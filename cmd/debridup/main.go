@@ -22,7 +22,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/crypto/argon2"
@@ -45,8 +44,7 @@ type app struct {
 	key       []byte
 	client    *http.Client
 	logger    *slog.Logger
-	lastRuns  map[int64]time.Time
-	runsMu    sync.Mutex
+	runs      *runCoordinator
 	cookieKey []byte
 }
 
@@ -106,6 +104,10 @@ type monitorState struct {
 }
 
 func main() {
+	maxConcurrentChecks, err := parseMaxConcurrentChecks(os.Getenv("DEBRIDUP_MAX_CONCURRENT_CHECKS"))
+	if err != nil {
+		panic(err)
+	}
 	dataDir := env("DEBRIDUP_DATA_DIR", "./data")
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		panic(err)
@@ -120,7 +122,7 @@ func main() {
 	}
 	defer db.Close()
 	cookieHash := sha256.Sum256(key)
-	a := &app{db: db, key: key, cookieKey: cookieHash[:], client: &http.Client{Timeout: 65 * time.Second}, logger: slog.Default(), lastRuns: map[int64]time.Time{}}
+	a := &app{db: db, key: key, cookieKey: cookieHash[:], client: &http.Client{Timeout: 65 * time.Second}, logger: slog.Default(), runs: newRunCoordinator(maxConcurrentChecks)}
 	if err := migrateDatabase(context.Background(), db); err != nil {
 		panic(err)
 	}
@@ -349,15 +351,6 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func (a *app) scheduler() {
-	t := time.NewTicker(5 * time.Second)
-	defer t.Stop()
-	for {
-		a.runDueMonitors()
-		<-t.C
-	}
-}
-
 func (a *app) retentionWorker(ctx context.Context, retention time.Duration) {
 	prune := func() {
 		if _, err := pruneHistory(ctx, a.db, time.Now().UTC().Add(-retention)); err != nil {
@@ -375,46 +368,6 @@ func (a *app) retentionWorker(ctx context.Context, retention time.Duration) {
 			return
 		case <-timer.C:
 			prune()
-		}
-	}
-}
-func (a *app) runDueMonitors() {
-	monitors, err := a.monitors()
-	if err != nil {
-		a.logger.Error("load monitors", "error", err)
-		return
-	}
-	now := time.Now()
-	for _, m := range monitors {
-		if !m.Enabled {
-			continue
-		}
-		a.runsMu.Lock()
-		last := a.lastRuns[m.ID]
-		due := last.IsZero() || now.Sub(last) >= time.Duration(m.IntervalSeconds)*time.Second
-		if due {
-			a.lastRuns[m.ID] = now
-		}
-		a.runsMu.Unlock()
-		if due {
-			go a.runMonitor(m)
-		}
-	}
-}
-func (a *app) runMonitor(m monitor) {
-	secret, err := a.monitorSecret(m.ID)
-	if err != nil {
-		a.logger.Error("load monitor secret", "monitor", m.ID, "error", err)
-		return
-	}
-	r := a.authCheck(m, secret)
-	if _, err = a.recordResult(m, "authenticated", r); err != nil {
-		a.logger.Error("record check", "monitor", m.ID, "error", err)
-	}
-	if m.PublicCheck {
-		pr := a.publicCheck(m)
-		if _, err = a.recordResult(m, "public", pr); err != nil {
-			a.logger.Error("record public check", "monitor", m.ID, "error", err)
 		}
 	}
 }
@@ -872,7 +825,12 @@ func (a *app) createMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m, _ := a.monitorByID(id)
-	go a.runMonitor(m)
+	if a.runs.Claim(m.ID, time.Now(), 0) {
+		go func(m monitor) {
+			defer a.runs.Release(m.ID)
+			a.runMonitor(m)
+		}(m)
+	}
 	writeJSON(w, 201, map[string]any{"id": id, "configured": true})
 }
 func boolInt(v bool) int {
@@ -952,11 +910,11 @@ func (a *app) updateMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.Enabled {
 		m, loadErr := a.monitorByID(id)
-		if loadErr == nil {
-			a.runsMu.Lock()
-			delete(a.lastRuns, id)
-			a.runsMu.Unlock()
-			go a.runMonitor(m)
+		if loadErr == nil && a.runs.Claim(m.ID, time.Now(), 0) {
+			go func(m monitor) {
+				defer a.runs.Release(m.ID)
+				a.runMonitor(m)
+			}(m)
 		}
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
@@ -1002,9 +960,7 @@ func (a *app) deleteMonitor(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]string{"error": "could not delete monitor"})
 		return
 	}
-	a.runsMu.Lock()
-	delete(a.lastRuns, id)
-	a.runsMu.Unlock()
+	a.runs.Forget(id)
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
@@ -1090,6 +1046,11 @@ func (a *app) testMonitor(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "monitor has no credential"})
 		return
 	}
+	if !a.runs.Claim(m.ID, time.Now(), 0) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "monitor check already in progress"})
+		return
+	}
+	defer a.runs.Release(m.ID)
 	result := a.authCheck(m, key)
 	_, err = a.recordResult(m, "authenticated", result)
 	if err != nil {
