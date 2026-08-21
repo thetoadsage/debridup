@@ -52,4 +52,5 @@ Use the [Unraid guide](unraid/README.md) for the short key-generation and templa
 | `DEBRIDUP_ENCRYPTION_KEY` | Alternative master-key source for non-Docker development. |
 | `DEBRIDUP_DATA_DIR` | Defaults to `./data`. |
 | `DEBRIDUP_ADDR` | Defaults to `:8080`. |
+| `DEBRIDUP_HISTORY_RETENTION` | Raw `check_results` retention as a Go duration; defaults to `2160h` (90 days), with a minimum of `24h`. Expired raw checks are pruned at startup and after each UTC date change; incidents and incident events are retained. |
 | `PUID` / `PGID` | Optional runtime user and group IDs for bind-mounted data; Unraid template defaults to `99` / `100`. |

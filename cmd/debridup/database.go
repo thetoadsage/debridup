@@ -12,6 +12,11 @@ import (
 
 const currentSchemaVersion = 1
 
+const (
+	defaultHistoryRetention = 90 * 24 * time.Hour
+	minimumHistoryRetention = 24 * time.Hour
+)
+
 const currentSchema = `
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS monitors (
@@ -140,4 +145,38 @@ func databaseReady(ctx context.Context, db *sql.DB) error {
 	defer cancel()
 	var one int
 	return db.QueryRowContext(ctx, "SELECT 1").Scan(&one)
+}
+
+func parseRetention(raw string) (time.Duration, error) {
+	if raw == "" {
+		return defaultHistoryRetention, nil
+	}
+	retention, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, err
+	}
+	if retention < minimumHistoryRetention {
+		return 0, errors.New("DEBRIDUP_HISTORY_RETENTION must be at least 24h")
+	}
+	return retention, nil
+}
+
+func pruneHistory(ctx context.Context, db *sql.DB, cutoff time.Time) (int64, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `UPDATE incident_events SET check_id = NULL WHERE check_id IN (SELECT id FROM check_results WHERE checked_at < ?)`, cutoff.Unix()); err != nil {
+		return 0, err
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM check_results WHERE checked_at < ?`, cutoff.Unix())
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

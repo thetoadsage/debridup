@@ -127,8 +127,13 @@ func main() {
 	if err := a.ensureAdmin(os.Getenv("DEBRIDUP_ADMIN_PASSWORD")); err != nil {
 		panic(err)
 	}
+	retention, err := parseRetention(os.Getenv("DEBRIDUP_HISTORY_RETENTION"))
+	if err != nil {
+		panic(err)
+	}
 	go a.scheduler()
 	go a.notificationWorker()
+	go a.retentionWorker(context.Background(), retention)
 	addr := env("DEBRIDUP_ADDR", ":8080")
 	a.logger.Info("DebridUp started", "addr", addr)
 	server := &http.Server{Addr: addr, Handler: a.routes(), ReadHeaderTimeout: 10 * time.Second}
@@ -350,6 +355,27 @@ func (a *app) scheduler() {
 	for {
 		a.runDueMonitors()
 		<-t.C
+	}
+}
+
+func (a *app) retentionWorker(ctx context.Context, retention time.Duration) {
+	prune := func() {
+		if _, err := pruneHistory(ctx, a.db, time.Now().UTC().Add(-retention)); err != nil {
+			a.logger.Error("history prune failed", "error", err)
+		}
+	}
+	prune()
+	for {
+		now := time.Now().UTC()
+		next := now.Truncate(24 * time.Hour).Add(24 * time.Hour)
+		timer := time.NewTimer(time.Until(next))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+			prune()
+		}
 	}
 }
 func (a *app) runDueMonitors() {
