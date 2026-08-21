@@ -9,6 +9,15 @@ import (
 
 const defaultMaxConcurrentChecks = 4
 
+type runClaimResult uint8
+
+const (
+	claimAccepted runClaimResult = iota
+	claimNotDue
+	claimOverlap
+	claimCapacity
+)
+
 func parseMaxConcurrentChecks(value string) (int, error) {
 	if value == "" {
 		return defaultMaxConcurrentChecks, nil
@@ -21,36 +30,77 @@ func parseMaxConcurrentChecks(value string) (int, error) {
 }
 
 type runCoordinator struct {
-	mu       sync.Mutex
-	lastRuns map[int64]time.Time
-	inFlight map[int64]struct{}
-	active   int
-	limit    int
+	mu               sync.Mutex
+	lastRuns         map[int64]time.Time
+	inFlight         map[int64]struct{}
+	pendingImmediate map[int64]struct{}
+	active           int
+	limit            int
+	skippedOverlaps  uint64
 }
 
 func newRunCoordinator(limit int) *runCoordinator {
 	return &runCoordinator{
-		lastRuns: make(map[int64]time.Time),
-		inFlight: make(map[int64]struct{}),
-		limit:    limit,
+		lastRuns:         make(map[int64]time.Time),
+		inFlight:         make(map[int64]struct{}),
+		pendingImmediate: make(map[int64]struct{}),
+		limit:            limit,
 	}
 }
 
-func (c *runCoordinator) Claim(id int64, now time.Time, interval time.Duration) bool {
+func (c *runCoordinator) Claim(id int64, now time.Time, interval time.Duration) runClaimResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	last := c.lastRuns[id]
-	if !last.IsZero() && now.Sub(last) < interval {
-		return false
+	_, immediate := c.pendingImmediate[id]
+	if !immediate {
+		last := c.lastRuns[id]
+		if !last.IsZero() && now.Sub(last) < interval {
+			return claimNotDue
+		}
 	}
-	if _, running := c.inFlight[id]; running || c.active >= c.limit {
-		return false
+	if _, running := c.inFlight[id]; running {
+		if !immediate {
+			c.lastRuns[id] = now
+			c.skippedOverlaps++
+		}
+		return claimOverlap
 	}
+	if c.active >= c.limit {
+		return claimCapacity
+	}
+	delete(c.pendingImmediate, id)
 	c.lastRuns[id] = now
 	c.inFlight[id] = struct{}{}
 	c.active++
-	return true
+	return claimAccepted
+}
+
+func (c *runCoordinator) ClaimManual(id int64) runClaimResult {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, running := c.inFlight[id]; running {
+		return claimOverlap
+	}
+	if c.active >= c.limit {
+		return claimCapacity
+	}
+	c.inFlight[id] = struct{}{}
+	c.active++
+	return claimAccepted
+}
+
+func (c *runCoordinator) RequestImmediate(id int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pendingImmediate[id] = struct{}{}
+}
+
+func (c *runCoordinator) SkippedOverlaps() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.skippedOverlaps
 }
 
 func (c *runCoordinator) Release(id int64) {
@@ -68,6 +118,7 @@ func (c *runCoordinator) Forget(id int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.lastRuns, id)
+	delete(c.pendingImmediate, id)
 }
 
 func (a *app) scheduler() {
@@ -86,7 +137,7 @@ func (a *app) runDueMonitorsAt(now time.Time) {
 		return
 	}
 	for _, m := range monitors {
-		if !m.Enabled || !a.runs.Claim(m.ID, now, time.Duration(m.IntervalSeconds)*time.Second) {
+		if !m.Enabled || a.runs.Claim(m.ID, now, time.Duration(m.IntervalSeconds)*time.Second) != claimAccepted {
 			continue
 		}
 		go func(m monitor) {

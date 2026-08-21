@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSendNtfy(t *testing.T) {
@@ -301,4 +303,77 @@ func TestResetHistoryScopesAndPreservesConfiguration(t *testing.T) {
 	assertCount(`SELECT COUNT(*) FROM notification_outbox WHERE event_type='test'`, 1)
 	assertCount(`SELECT COUNT(*) FROM monitors`, 2)
 	assertCount(`SELECT COUNT(*) FROM monitor_secrets`, 2)
+}
+
+func TestUpdateMonitorRetriesImmediateCheckAfterRejection(t *testing.T) {
+	for _, rejection := range []string{"overlap", "capacity"} {
+		t.Run(rejection, func(t *testing.T) {
+			db := migratedTestDB(t)
+			monitorID := insertSyntheticMonitor(t, db, "torbox")
+			a := &app{db: db, runs: newRunCoordinator(1)}
+			now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+			if got := a.runs.Claim(monitorID, now, time.Hour); got != claimAccepted {
+				t.Fatalf("initial monitor claim = %v, want accepted", got)
+			}
+			blockerID := monitorID
+			if rejection == "capacity" {
+				a.runs.Release(monitorID)
+				blockerID = 99
+				if got := a.runs.Claim(blockerID, now, time.Hour); got != claimAccepted {
+					t.Fatalf("capacity holder claim = %v, want accepted", got)
+				}
+			}
+
+			body := strings.NewReader(`{"name":"Updated","apiKey":"","enabled":true,"intervalSeconds":3600,"timeoutSeconds":15,"failureThreshold":3,"recoveryThreshold":2,"publicCheck":false}`)
+			request := httptest.NewRequest(http.MethodPut, "/api/monitors/1", body)
+			request.Header.Set("Content-Type", "application/json")
+			request.SetPathValue("id", "1")
+			response := httptest.NewRecorder()
+			a.updateMonitor(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("update status = %d, body = %q", response.Code, response.Body.String())
+			}
+
+			a.runs.Release(blockerID)
+			if got := a.runs.Claim(monitorID, now.Add(time.Minute), time.Hour); got != claimAccepted {
+				t.Fatalf("post-update retry = %v, want accepted", got)
+			}
+		})
+	}
+}
+
+func TestManualMonitorCheckDistinguishesOverlapFromCapacity(t *testing.T) {
+	db := migratedTestDB(t)
+	monitorID := insertSyntheticMonitor(t, db, "torbox")
+	key := bytes.Repeat([]byte{1}, 32)
+	a := &app{db: db, key: key, runs: newRunCoordinator(1)}
+	nonce, ciphertext, err := a.encrypt([]byte("test-credential"), "monitor:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO monitor_secrets(monitor_id,nonce,ciphertext,updated_at) VALUES(?,?,?,?)`, monitorID, nonce, ciphertext, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	if got := a.runs.Claim(monitorID, now, time.Hour); got != claimAccepted {
+		t.Fatalf("monitor claim = %v, want accepted", got)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/monitors/1/test", nil)
+	request.SetPathValue("id", "1")
+	overlap := httptest.NewRecorder()
+	a.testMonitor(overlap, request)
+	if overlap.Code != http.StatusConflict {
+		t.Fatalf("overlap status = %d, want %d", overlap.Code, http.StatusConflict)
+	}
+	a.runs.Release(monitorID)
+
+	if got := a.runs.Claim(99, now, time.Hour); got != claimAccepted {
+		t.Fatalf("capacity holder claim = %v, want accepted", got)
+	}
+	capacity := httptest.NewRecorder()
+	a.testMonitor(capacity, request)
+	if capacity.Code != http.StatusServiceUnavailable {
+		t.Fatalf("capacity status = %d, want %d", capacity.Code, http.StatusServiceUnavailable)
+	}
 }

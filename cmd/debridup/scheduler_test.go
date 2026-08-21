@@ -35,38 +35,127 @@ func TestParseMaxConcurrentChecks(t *testing.T) {
 func TestRunCoordinatorRejectsOverlap(t *testing.T) {
 	c := newRunCoordinator(2)
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
-	if !c.Claim(1, now, 15*time.Second) {
-		t.Fatal("first claim rejected")
+	if got := c.Claim(1, now, 15*time.Second); got != claimAccepted {
+		t.Fatalf("first claim = %v, want accepted", got)
 	}
-	if c.Claim(1, now.Add(20*time.Second), 15*time.Second) {
-		t.Fatal("overlap accepted")
+	if got := c.Claim(1, now.Add(20*time.Second), 15*time.Second); got != claimOverlap {
+		t.Fatalf("overlapping claim = %v, want overlap", got)
 	}
 	c.Release(1)
-	if !c.Claim(1, now.Add(20*time.Second), 15*time.Second) {
-		t.Fatal("claim after release rejected")
+	if got := c.Claim(1, now.Add(20*time.Second), 15*time.Second); got != claimNotDue {
+		t.Fatalf("claim immediately after overlap release = %v, want not due", got)
+	}
+	if got := c.Claim(1, now.Add(35*time.Second), 15*time.Second); got != claimAccepted {
+		t.Fatalf("claim one interval after overlap = %v, want accepted", got)
 	}
 }
 
 func TestRunCoordinatorBoundsGlobalConcurrency(t *testing.T) {
 	c := newRunCoordinator(1)
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
-	if !c.Claim(1, now, time.Second) {
-		t.Fatal("first claim rejected")
+	if got := c.Claim(1, now, time.Second); got != claimAccepted {
+		t.Fatalf("first claim = %v, want accepted", got)
 	}
-	if c.Claim(2, now, time.Second) {
-		t.Fatal("global limit exceeded")
+	if got := c.Claim(2, now, time.Second); got != claimCapacity {
+		t.Fatalf("second claim = %v, want capacity", got)
 	}
 }
 
 func TestRunCoordinatorForgetsLastRun(t *testing.T) {
 	c := newRunCoordinator(1)
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
-	if !c.Claim(1, now, time.Hour) {
-		t.Fatal("first claim rejected")
+	if got := c.Claim(1, now, time.Hour); got != claimAccepted {
+		t.Fatalf("first claim = %v, want accepted", got)
 	}
 	c.Release(1)
 	c.Forget(1)
-	if !c.Claim(1, now.Add(time.Second), time.Hour) {
-		t.Fatal("forgotten monitor remained delayed")
+	if got := c.Claim(1, now.Add(time.Second), time.Hour); got != claimAccepted {
+		t.Fatalf("claim after forget = %v, want accepted", got)
+	}
+}
+
+func TestRunCoordinatorDuplicateReleasePreservesBound(t *testing.T) {
+	c := newRunCoordinator(1)
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	if got := c.Claim(1, now, time.Minute); got != claimAccepted {
+		t.Fatalf("first claim = %v, want accepted", got)
+	}
+	c.Release(1)
+	c.Release(1)
+	if got := c.Claim(2, now, time.Minute); got != claimAccepted {
+		t.Fatalf("claim after release = %v, want accepted", got)
+	}
+	if got := c.Claim(3, now, time.Minute); got != claimCapacity {
+		t.Fatalf("claim after duplicate release = %v, want capacity", got)
+	}
+}
+
+func TestRunCoordinatorRestoresCapacityOnRelease(t *testing.T) {
+	c := newRunCoordinator(1)
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	if got := c.Claim(1, now, time.Minute); got != claimAccepted {
+		t.Fatalf("first claim = %v, want accepted", got)
+	}
+	if got := c.Claim(2, now, time.Minute); got != claimCapacity {
+		t.Fatalf("claim at capacity = %v, want capacity", got)
+	}
+	c.Release(1)
+	if got := c.Claim(2, now.Add(time.Second), time.Minute); got != claimAccepted {
+		t.Fatalf("claim after release = %v, want accepted", got)
+	}
+}
+
+func TestRunCoordinatorDueOverlapAdvancesScheduleAndMetric(t *testing.T) {
+	c := newRunCoordinator(1)
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	if got := c.Claim(1, now, time.Minute); got != claimAccepted {
+		t.Fatalf("first claim = %v, want accepted", got)
+	}
+	if got := c.Claim(1, now.Add(time.Minute), time.Minute); got != claimOverlap {
+		t.Fatalf("due active claim = %v, want overlap", got)
+	}
+	c.Release(1)
+	if got := c.Claim(1, now.Add(61*time.Second), time.Minute); got != claimNotDue {
+		t.Fatalf("post-overlap claim = %v, want not due", got)
+	}
+	if got := c.SkippedOverlaps(); got != 1 {
+		t.Fatalf("skipped overlaps = %d, want 1", got)
+	}
+}
+
+func TestRunCoordinatorRetriesPendingImmediateAfterCapacity(t *testing.T) {
+	c := newRunCoordinator(1)
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	if got := c.Claim(1, now, time.Hour); got != claimAccepted {
+		t.Fatalf("first claim = %v, want accepted", got)
+	}
+	c.RequestImmediate(2)
+	if got := c.Claim(2, now, time.Hour); got != claimCapacity {
+		t.Fatalf("pending claim at capacity = %v, want capacity", got)
+	}
+	c.Release(1)
+	if got := c.Claim(2, now.Add(time.Second), time.Hour); got != claimAccepted {
+		t.Fatalf("retried pending claim = %v, want accepted", got)
+	}
+}
+
+func TestRunCoordinatorOverdueRunDoesNotStarveLaterMonitor(t *testing.T) {
+	c := newRunCoordinator(1)
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	if got := c.Claim(1, now, time.Minute); got != claimAccepted {
+		t.Fatalf("first monitor claim = %v, want accepted", got)
+	}
+	if got := c.Claim(1, now.Add(time.Minute), time.Minute); got != claimOverlap {
+		t.Fatalf("overdue active claim = %v, want overlap", got)
+	}
+	if got := c.Claim(2, now.Add(time.Minute), time.Minute); got != claimCapacity {
+		t.Fatalf("later monitor while active = %v, want capacity", got)
+	}
+	c.Release(1)
+	if got := c.Claim(1, now.Add(65*time.Second), time.Minute); got != claimNotDue {
+		t.Fatalf("earlier monitor after release = %v, want not due", got)
+	}
+	if got := c.Claim(2, now.Add(65*time.Second), time.Minute); got != claimAccepted {
+		t.Fatalf("later monitor after release = %v, want accepted", got)
 	}
 }

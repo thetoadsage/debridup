@@ -825,7 +825,8 @@ func (a *app) createMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m, _ := a.monitorByID(id)
-	if a.runs.Claim(m.ID, time.Now(), 0) {
+	a.runs.RequestImmediate(m.ID)
+	if a.runs.Claim(m.ID, time.Now(), time.Duration(m.IntervalSeconds)*time.Second) == claimAccepted {
 		go func(m monitor) {
 			defer a.runs.Release(m.ID)
 			a.runMonitor(m)
@@ -910,7 +911,10 @@ func (a *app) updateMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.Enabled {
 		m, loadErr := a.monitorByID(id)
-		if loadErr == nil && a.runs.Claim(m.ID, time.Now(), 0) {
+		if loadErr == nil {
+			a.runs.RequestImmediate(m.ID)
+		}
+		if loadErr == nil && a.runs.Claim(m.ID, time.Now(), time.Duration(m.IntervalSeconds)*time.Second) == claimAccepted {
 			go func(m monitor) {
 				defer a.runs.Release(m.ID)
 				a.runMonitor(m)
@@ -1046,8 +1050,12 @@ func (a *app) testMonitor(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "monitor has no credential"})
 		return
 	}
-	if !a.runs.Claim(m.ID, time.Now(), 0) {
+	switch a.runs.ClaimManual(m.ID) {
+	case claimOverlap:
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "monitor check already in progress"})
+		return
+	case claimCapacity:
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "monitor check capacity unavailable"})
 		return
 	}
 	defer a.runs.Release(m.ID)
