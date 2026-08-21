@@ -18,10 +18,15 @@ All authenticated checks are read-only account or history requests. Most provide
 3. Start it:
 
    ```sh
-   docker compose up -d --build
+   docker compose pull
+   docker compose up -d
    ```
 
 Open `http://localhost:8080`. Use a TLS reverse proxy before exposing the dashboard beyond a trusted private network.
+
+The published image is `ghcr.io/thetoadsage/debridup:latest` for both AMD64 and ARM64 servers. Set `DEBRIDUP_IMAGE_TAG` to a published version tag when you want to pin a deployment. To update an existing installation, run `docker compose pull && docker compose up -d`.
+
+To build directly from source instead, run `docker build -t debridup:local .`.
 
 ## Security model
 

@@ -1,7 +1,6 @@
 services:
   debridup:
-    build: .
-    image: debridup:local
+    image: ghcr.io/thetoadsage/debridup:${DEBRIDUP_IMAGE_TAG:-latest}
     ports:
       - "8080:8080"
     environment:
