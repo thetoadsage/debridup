@@ -1,0 +1,5 @@
+.graph-label { color: var(--muted); font-size: 12px; margin: 18px 0 6px; }
+.latency-chart { height: 48px; width: 100%; overflow: visible; }
+.latency-chart polyline { fill: none; stroke: var(--blue); stroke-width: 1.1; }
+.failure-dot { fill: var(--red); }
+.graph-empty { font-size: 12px; margin: 18px 0 0; }
