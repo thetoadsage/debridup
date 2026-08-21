@@ -1,0 +1,19 @@
+.notification-panel { display: flex; flex-direction: column; }
+.channel-badge { border-radius: 999px; padding: 5px 10px; font-size: 11px; font-weight: 800; letter-spacing: .03em; }
+.channel-badge.enabled { color: var(--green); background: #12392f; }
+.channel-badge.disabled { color: var(--amber); background: #40341f; }
+.channel-badge.unconfigured { color: var(--muted); background: #1d2b3b; }
+.channel-summary { display: flex; gap: 12px; align-items: center; margin: 20px 0 4px; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: #0c1723; }
+.channel-summary p { margin: 2px 0 0; font-size: 12px; }
+.channel-icon { width: 34px; height: 34px; flex: 0 0 34px; display: grid; place-items: center; border-radius: 9px; background: #28394c; color: var(--blue); font-weight: 900; }
+.form small { color: var(--muted); font-size: 11px; }
+.toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 13px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.toggle-row span { display: grid; gap: 2px; }
+.toggle-row strong { color: var(--text); font-size: 13px; }
+.toggle-row input { width: 18px; height: 18px; flex: 0 0 auto; }
+.notification-actions { display: flex; gap: 9px; flex-wrap: wrap; }
+.notification-actions .secondary { color: var(--text); background: #253649; }
+.notification-actions button:disabled { cursor: not-allowed; opacity: .45; }
+.channel-message { min-height: 21px; margin: 0; color: var(--muted); font-size: 13px; }
+.channel-message.success { color: var(--green); }
+.channel-message.error { color: var(--red); }

@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -68,6 +69,26 @@ type checkResult struct {
 	ErrorCode   string
 	ErrorDetail string
 	CheckedAt   time.Time
+}
+
+type providerDefinition struct {
+	Endpoint       string
+	PublicEndpoint string
+	Method         string
+}
+
+var providerDefinitions = map[string]providerDefinition{
+	"torbox":     {Endpoint: "https://api.torbox.app/v1/api/user/me", PublicEndpoint: "https://status.torbox.app/", Method: http.MethodGet},
+	"premiumize": {Endpoint: "https://www.premiumize.me/api/account/info", PublicEndpoint: "https://premiumize.reamaze.com/status", Method: http.MethodGet},
+	"alldebrid":  {Endpoint: "https://api.alldebrid.com/v4/user", PublicEndpoint: "https://api.alldebrid.com/v4/ping", Method: http.MethodGet},
+	"realdebrid": {Endpoint: "https://api.real-debrid.com/rest/1.0/user", PublicEndpoint: "https://api.real-debrid.com/rest/1.0/time", Method: http.MethodGet},
+	"torrin":     {Endpoint: "https://torrin.app/api/stats", PublicEndpoint: "https://torrin.app/api/stats/public", Method: http.MethodGet},
+	"pikpak":     {Endpoint: "https://user.mypikpak.com/v1/user/me", PublicEndpoint: "https://mypikpak.com/", Method: http.MethodGet},
+	"offcloud":   {Endpoint: "https://offcloud.com/api/account/info", PublicEndpoint: "https://offcloud.com/", Method: http.MethodGet},
+	"debridlink": {Endpoint: "https://debrid-link.com/api/v2/account/infos", PublicEndpoint: "https://www.debrid-link.com/webapp/status", Method: http.MethodGet},
+	"easydebrid": {Endpoint: "https://easydebrid.com/api/v1/user/details", PublicEndpoint: "https://easydebrid.com/", Method: http.MethodGet},
+	"debrider":   {Endpoint: "https://debrider.app/api/v1/tasks", PublicEndpoint: "https://stats.uptimerobot.com/shklobtEFJ/801337046", Method: http.MethodGet},
+	"deepbrid":   {Endpoint: "https://www.deepbrid.com/api/v1/user", PublicEndpoint: "https://www.deepbrid.com/api/v1/hosts", Method: http.MethodGet},
 }
 
 type monitorState struct {
@@ -141,7 +162,7 @@ PRAGMA journal_mode = WAL;
 PRAGMA busy_timeout = 5000;
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS monitors (
- id INTEGER PRIMARY KEY, provider TEXT NOT NULL CHECK(provider IN ('torbox','premiumize')), name TEXT NOT NULL,
+ id INTEGER PRIMARY KEY, provider TEXT NOT NULL CHECK(provider IN ('torbox','premiumize','alldebrid','realdebrid','torrin','pikpak','offcloud','debridlink','easydebrid','debrider','deepbrid')), name TEXT NOT NULL,
  enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 60, timeout_seconds INTEGER NOT NULL DEFAULT 15,
  failure_threshold INTEGER NOT NULL DEFAULT 3, recovery_threshold INTEGER NOT NULL DEFAULT 2, public_check INTEGER NOT NULL DEFAULT 0,
  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
@@ -175,7 +196,48 @@ CREATE TABLE IF NOT EXISTS notification_outbox (
 );
 CREATE INDEX IF NOT EXISTS outbox_pending ON notification_outbox(status, next_attempt_at);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	return a.migrateProviderConstraint()
+}
+
+func (a *app) migrateProviderConstraint() error {
+	var schema string
+	if err := a.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='monitors'`).Scan(&schema); err != nil {
+		return err
+	}
+	if strings.Contains(schema, "'deepbrid'") {
+		return nil
+	}
+	conn, err := a.db.Conn(context.Background())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err = conn.ExecContext(context.Background(), `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer conn.ExecContext(context.Background(), `PRAGMA foreign_keys = ON`)
+	tx, err := conn.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`
+CREATE TABLE monitors_new (
+ id INTEGER PRIMARY KEY, provider TEXT NOT NULL CHECK(provider IN ('torbox','premiumize','alldebrid','realdebrid','torrin','pikpak','offcloud','debridlink','easydebrid','debrider','deepbrid')), name TEXT NOT NULL,
+ enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 60, timeout_seconds INTEGER NOT NULL DEFAULT 15,
+ failure_threshold INTEGER NOT NULL DEFAULT 3, recovery_threshold INTEGER NOT NULL DEFAULT 2, public_check INTEGER NOT NULL DEFAULT 0,
+ created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+INSERT INTO monitors_new SELECT * FROM monitors;
+DROP TABLE monitors;
+ALTER TABLE monitors_new RENAME TO monitors;
+`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (a *app) ensureAdmin(password string) error {
@@ -240,14 +302,21 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /api/overview", a.auth(a.overview))
 	mux.HandleFunc("GET /api/monitors", a.auth(a.listMonitors))
 	mux.HandleFunc("POST /api/monitors", a.auth(a.createMonitor))
+	mux.HandleFunc("PUT /api/monitors/{id}", a.auth(a.updateMonitor))
+	mux.HandleFunc("DELETE /api/monitors/{id}", a.auth(a.deleteMonitor))
+	mux.HandleFunc("POST /api/monitors/{id}/reset", a.auth(a.resetMonitorStats))
 	mux.HandleFunc("POST /api/monitors/{id}/test", a.auth(a.testMonitor))
 	mux.HandleFunc("GET /api/monitors/{id}/checks", a.auth(a.listChecks))
+	mux.HandleFunc("POST /api/stats/reset", a.auth(a.resetAllStats))
 	mux.HandleFunc("GET /api/incidents", a.auth(a.listIncidents))
 	mux.HandleFunc("GET /api/notifications/ntfy", a.auth(a.getNtfy))
 	mux.HandleFunc("PUT /api/notifications/ntfy", a.auth(a.putNtfy))
+	mux.HandleFunc("POST /api/notifications/ntfy/test", a.auth(a.testNtfy))
 	static, _ := fs.Sub(webFS, "web")
 	files := http.FileServer(http.FS(static))
 	mux.Handle("GET /login.html", files)
+	mux.Handle("GET /login.js", files)
+	mux.Handle("GET /app.css", files)
 	mux.Handle("/", a.auth(func(w http.ResponseWriter, r *http.Request) { files.ServeHTTP(w, r) }))
 	return securityHeaders(mux)
 }
@@ -394,62 +463,43 @@ func (a *app) runMonitor(m monitor) {
 	}
 }
 
-func (a *app) authCheck(m monitor, apiKey string) checkResult {
+func (a *app) authCheck(m monitor, credential string) checkResult {
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.TimeoutSeconds)*time.Second)
 	defer cancel()
-	var endpoint string
-	switch m.Provider {
-	case "torbox":
-		endpoint = "https://api.torbox.app/v1/api/user/me"
-	case "premiumize":
-		endpoint = "https://www.premiumize.me/api/account/info"
-	default:
+	provider, ok := providerDefinitions[m.Provider]
+	if !ok {
 		return checkResult{State: stateAPI, ErrorCode: "unsupported_provider", CheckedAt: started}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, provider.Method, provider.Endpoint, nil)
 	if err != nil {
 		return checkResult{State: stateConnection, ErrorCode: "request_build", CheckedAt: started}
 	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Authorization", "Bearer "+credential)
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "DebridUp/1.0")
 	resp, err := a.client.Do(req)
 	duration := time.Since(started).Milliseconds()
 	if err != nil {
 		return checkResult{State: stateConnection, DurationMS: duration, ErrorCode: transportCode(err), ErrorDetail: "request could not be completed", CheckedAt: started}
 	}
 	defer resp.Body.Close()
+	if resp.Request != nil && (resp.Request.URL.Host != req.URL.Host || resp.Request.URL.Path != req.URL.Path) {
+		return checkResult{State: stateAuthFailed, DurationMS: duration, HTTPStatus: resp.StatusCode, ErrorCode: "authentication_redirect", CheckedAt: started}
+	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 128<<10))
 	if err != nil {
 		return checkResult{State: stateConnection, DurationMS: duration, HTTPStatus: resp.StatusCode, ErrorCode: "read_error", CheckedAt: started}
 	}
 	r := checkResult{DurationMS: duration, HTTPStatus: resp.StatusCode, CheckedAt: started}
-	if m.Provider == "torbox" {
-		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized {
-			r.State = stateAuthFailed
-			r.ErrorCode = "authentication_rejected"
-			return r
-		}
-		if resp.StatusCode >= 500 {
-			r.State = stateAPI
-			r.ErrorCode = "server_error"
-			return r
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			r.State = stateAPI
-			r.ErrorCode = "unexpected_status"
-			return r
-		}
-		var payload struct {
-			Success *bool  `json:"success"`
-			Detail  string `json:"detail"`
-		}
-		if json.Unmarshal(body, &payload) != nil || (payload.Success != nil && !*payload.Success) {
-			r.State = stateAPI
-			r.ErrorCode = "invalid_response"
-			return r
-		}
-		r.State = stateHealthy
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		r.State = stateAuthFailed
+		r.ErrorCode = "authentication_rejected"
+		return r
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		r.State = stateAPI
+		r.ErrorCode = "rate_limited"
 		return r
 	}
 	if resp.StatusCode >= 500 {
@@ -462,40 +512,76 @@ func (a *app) authCheck(m monitor, apiKey string) checkResult {
 		r.ErrorCode = "unexpected_status"
 		return r
 	}
-	var payload struct {
-		Status any    `json:"status"`
-		Code   string `json:"code"`
-	}
+	var payload any
 	if json.Unmarshal(body, &payload) != nil {
 		r.State = stateAPI
 		r.ErrorCode = "invalid_response"
 		return r
 	}
-	if s, ok := payload.Status.(string); ok && s == "success" {
+	stateValue, code := classifyProviderPayload(m.Provider, payload)
+	if stateValue == "" {
 		r.State = stateHealthy
 		return r
 	}
-	r.State = stateAPI
-	r.ErrorCode = "api_error"
-	if strings.Contains(strings.ToLower(payload.Code), "auth") || strings.Contains(strings.ToLower(payload.Code), "key") || strings.Contains(strings.ToLower(payload.Code), "token") {
-		r.State = stateAuthFailed
-		r.ErrorCode = "authentication_rejected"
-	}
+	r.State = stateValue
+	r.ErrorCode = code
 	return r
+}
+
+func classifyProviderPayload(provider string, payload any) (string, string) {
+	object, isObject := payload.(map[string]any)
+	if !isObject {
+		return "", ""
+	}
+	switch provider {
+	case "torbox":
+		if success, present := object["success"].(bool); present && !success {
+			return classifyPayloadError(object)
+		}
+	case "premiumize", "alldebrid":
+		if status, present := object["status"].(string); present && !strings.EqualFold(status, "success") {
+			return classifyPayloadError(object)
+		}
+	case "debridlink":
+		if success, present := object["success"].(bool); present && !success {
+			return classifyPayloadError(object)
+		}
+	case "deepbrid":
+		if errorValue, present := object["error"].(float64); present && errorValue != 0 {
+			return classifyPayloadError(object)
+		}
+	case "offcloud":
+		if _, present := object["error"]; present {
+			return classifyPayloadError(object)
+		}
+	}
+	return "", ""
+}
+
+func classifyPayloadError(payload map[string]any) (string, string) {
+	encoded, _ := json.Marshal(payload)
+	message := strings.ToLower(string(encoded))
+	for _, marker := range []string{"auth", "apikey", "api key", "token", "credential", "unauthor", "logged in", "login"} {
+		if strings.Contains(message, marker) {
+			return stateAuthFailed, "authentication_rejected"
+		}
+	}
+	return stateAPI, "api_error"
 }
 
 func (a *app) publicCheck(m monitor) checkResult {
 	started := time.Now()
-	endpoint := "https://status.torbox.app/"
-	if m.Provider == "premiumize" {
-		endpoint = "https://premiumize.reamaze.com/status"
+	provider, ok := providerDefinitions[m.Provider]
+	if !ok || provider.PublicEndpoint == "" {
+		return checkResult{State: stateAPI, ErrorCode: "unsupported_provider", CheckedAt: started}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.TimeoutSeconds)*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, provider.PublicEndpoint, nil)
 	if err != nil {
 		return checkResult{State: stateConnection, ErrorCode: "request_build", CheckedAt: started}
 	}
+	req.Header.Set("User-Agent", "DebridUp/1.0")
 	resp, err := a.client.Do(req)
 	duration := time.Since(started).Milliseconds()
 	if err != nil {
@@ -567,7 +653,7 @@ func (a *app) recordResult(m monitor, source string, r checkResult) (int64, erro
 			ms.Current = r.State
 			ms.StateSince = ms.FailureStartedAt
 			eventType = "opened"
-			incidentID, err = openIncident(tx, m.ID, ms.FailureStartedAt, r.CheckedAt.Unix(), r.State, checkID)
+			incidentID, err = openIncident(tx, m.ID, ms.FailureStartedAt, r.CheckedAt.Unix(), r.State, incidentSummary(r), checkID)
 			if err != nil {
 				return 0, err
 			}
@@ -575,7 +661,7 @@ func (a *app) recordResult(m monitor, source string, r checkResult) (int64, erro
 			ms.Current = r.State
 			ms.StateSince = r.CheckedAt.Unix()
 			eventType = "state_changed"
-			incidentID, err = changeIncident(tx, m.ID, previous, r.State, r.CheckedAt.Unix(), checkID)
+			incidentID, err = changeIncident(tx, m.ID, previous, r.State, incidentSummary(r), r.CheckedAt.Unix(), checkID)
 			if err != nil {
 				return 0, err
 			}
@@ -589,7 +675,7 @@ func (a *app) recordResult(m monitor, source string, r checkResult) (int64, erro
 		return 0, err
 	}
 	if eventType != "" {
-		a.enqueueNotification(incidentID, eventType, m.Name, previous, ms.Current, r.CheckedAt)
+		a.enqueueNotification(incidentID, eventType, m.Name, previous, ms.Current, incidentSummary(r), r.CheckedAt)
 	}
 	return checkID, nil
 }
@@ -614,8 +700,8 @@ func stateFor(tx *sql.Tx, id int64, now int64) (monitorState, error) {
 	}
 	return s, err
 }
-func openIncident(tx *sql.Tx, monitorID, opened, detected int64, state string, checkID int64) (int64, error) {
-	res, err := tx.Exec(`INSERT INTO incidents(monitor_id,opened_at,detected_at,initial_state,latest_state) VALUES(?,?,?,?,?)`, monitorID, opened, detected, state, state)
+func openIncident(tx *sql.Tx, monitorID, opened, detected int64, state, summary string, checkID int64) (int64, error) {
+	res, err := tx.Exec(`INSERT INTO incidents(monitor_id,opened_at,detected_at,initial_state,latest_state,summary) VALUES(?,?,?,?,?,?)`, monitorID, opened, detected, state, state, summary)
 	if err != nil {
 		return 0, err
 	}
@@ -629,25 +715,75 @@ func resolveIncident(tx *sql.Tx, monitorID, at, checkID int64) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	_, err = tx.Exec(`UPDATE incidents SET resolved_at=?,latest_state=? WHERE id=?`, at, stateHealthy, id)
+	_, err = tx.Exec(`UPDATE incidents SET resolved_at=? WHERE id=?`, at, id)
 	if err != nil {
 		return 0, err
 	}
 	_, err = tx.Exec(`INSERT INTO incident_events(incident_id,type,new_state,created_at,check_id) VALUES(?,?,?,?,?)`, id, "recovered", stateHealthy, at, checkID)
 	return id, err
 }
-func changeIncident(tx *sql.Tx, monitorID int64, previous, next string, at, checkID int64) (int64, error) {
+func changeIncident(tx *sql.Tx, monitorID int64, previous, next, summary string, at, checkID int64) (int64, error) {
 	var id int64
 	err := tx.QueryRow(`SELECT id FROM incidents WHERE monitor_id=? AND resolved_at IS NULL ORDER BY id DESC LIMIT 1`, monitorID).Scan(&id)
 	if err != nil {
 		return 0, err
 	}
-	_, err = tx.Exec(`UPDATE incidents SET latest_state=? WHERE id=?`, next, id)
+	_, err = tx.Exec(`UPDATE incidents SET latest_state=?,summary=? WHERE id=?`, next, summary, id)
 	if err != nil {
 		return 0, err
 	}
 	_, err = tx.Exec(`INSERT INTO incident_events(incident_id,type,previous_state,new_state,created_at,check_id) VALUES(?,?,?,?,?,?)`, id, "state_changed", previous, next, at, checkID)
 	return id, err
+}
+
+func incidentSummary(r checkResult) string {
+	switch r.State {
+	case stateAuthFailed:
+		return "The provider rejected the configured credential. Verify or replace it."
+	case stateConnection:
+		if r.ErrorCode == "timeout" {
+			return "The authenticated API request timed out before the provider responded."
+		}
+		return "DebridUp could not establish a connection to the provider API."
+	case stateAPI:
+		switch r.ErrorCode {
+		case "server_error":
+			if r.HTTPStatus != 0 {
+				return fmt.Sprintf("The provider API returned HTTP %d, indicating a server-side failure.", r.HTTPStatus)
+			}
+			return "The provider API reported a server-side failure."
+		case "unexpected_status":
+			if r.HTTPStatus != 0 {
+				return fmt.Sprintf("The provider API returned the unexpected HTTP status %d.", r.HTTPStatus)
+			}
+			return "The provider API returned an unexpected HTTP status."
+		case "invalid_response":
+			return "The provider API was reachable, but its response was invalid or could not be understood."
+		case "api_error":
+			return "The provider API returned an application-level error."
+		case "rate_limited":
+			return "The provider API rate-limited the authenticated health check."
+		default:
+			return "The provider API was reachable but did not complete the health check successfully."
+		}
+	case stateHealthy:
+		return "The authenticated provider check succeeded again."
+	default:
+		return "The authenticated provider check failed."
+	}
+}
+
+func incidentStateDescription(state string) string {
+	switch state {
+	case stateAuthFailed:
+		return "Authentication is failing. Verify or replace the configured credential."
+	case stateConnection:
+		return "DebridUp could not connect to the provider API."
+	case stateAPI:
+		return "The provider API returned an error or invalid response."
+	default:
+		return "The authenticated provider check failed."
+	}
 }
 
 func (a *app) monitors() ([]monitor, error) {
@@ -739,8 +875,8 @@ func (a *app) createMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.Provider = strings.ToLower(strings.TrimSpace(in.Provider))
-	if in.Provider != "torbox" && in.Provider != "premiumize" {
-		writeJSON(w, 400, map[string]string{"error": "provider must be torbox or premiumize"})
+	if _, supported := providerDefinitions[in.Provider]; !supported {
+		writeJSON(w, 400, map[string]string{"error": "unsupported provider"})
 		return
 	}
 	if len(strings.TrimSpace(in.Name)) < 1 || len(in.Name) > 80 || len(strings.TrimSpace(in.APIKey)) < 8 {
@@ -790,6 +926,198 @@ func boolInt(v bool) int {
 	return 0
 }
 func monitorID(r *http.Request) (int64, error) { return strconv.ParseInt(r.PathValue("id"), 10, 64) }
+func (a *app) updateMonitor(w http.ResponseWriter, r *http.Request) {
+	id, err := monitorID(r)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid monitor id"})
+		return
+	}
+	var in struct {
+		Name              string `json:"name"`
+		APIKey            string `json:"apiKey"`
+		Enabled           bool   `json:"enabled"`
+		IntervalSeconds   int    `json:"intervalSeconds"`
+		TimeoutSeconds    int    `json:"timeoutSeconds"`
+		FailureThreshold  int    `json:"failureThreshold"`
+		RecoveryThreshold int    `json:"recoveryThreshold"`
+		PublicCheck       bool   `json:"publicCheck"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	in.Name = strings.TrimSpace(in.Name)
+	in.APIKey = strings.TrimSpace(in.APIKey)
+	if len(in.Name) < 1 || len(in.Name) > 80 {
+		writeJSON(w, 400, map[string]string{"error": "name is required and must be 80 characters or fewer"})
+		return
+	}
+	if in.APIKey != "" && len(in.APIKey) < 8 {
+		writeJSON(w, 400, map[string]string{"error": "replacement API key is too short"})
+		return
+	}
+	if in.IntervalSeconds < 15 || in.IntervalSeconds > 3600 || in.TimeoutSeconds < 3 || in.TimeoutSeconds > 60 || in.FailureThreshold < 1 || in.FailureThreshold > 20 || in.RecoveryThreshold < 1 || in.RecoveryThreshold > 20 {
+		writeJSON(w, 400, map[string]string{"error": "monitor values are out of range"})
+		return
+	}
+	var nonce, cipher []byte
+	if in.APIKey != "" {
+		nonce, cipher, err = a.encrypt([]byte(in.APIKey), "monitor:"+strconv.FormatInt(id, 10))
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": "could not secure replacement credential"})
+			return
+		}
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not update monitor"})
+		return
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE monitors SET name=?,enabled=?,interval_seconds=?,timeout_seconds=?,failure_threshold=?,recovery_threshold=?,public_check=?,updated_at=? WHERE id=?`, in.Name, boolInt(in.Enabled), in.IntervalSeconds, in.TimeoutSeconds, in.FailureThreshold, in.RecoveryThreshold, boolInt(in.PublicCheck), time.Now().Unix(), id)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not update monitor"})
+		return
+	}
+	updated, _ := result.RowsAffected()
+	if updated == 0 {
+		writeJSON(w, 404, map[string]string{"error": "monitor not found"})
+		return
+	}
+	if in.APIKey != "" {
+		_, err = tx.Exec(`INSERT INTO monitor_secrets(monitor_id,nonce,ciphertext,updated_at) VALUES(?,?,?,?) ON CONFLICT(monitor_id) DO UPDATE SET nonce=excluded.nonce,ciphertext=excluded.ciphertext,updated_at=excluded.updated_at`, id, nonce, cipher, time.Now().Unix())
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": "could not update credential"})
+			return
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not update monitor"})
+		return
+	}
+	if in.Enabled {
+		m, loadErr := a.monitorByID(id)
+		if loadErr == nil {
+			a.runsMu.Lock()
+			delete(a.lastRuns, id)
+			a.runsMu.Unlock()
+			go a.runMonitor(m)
+		}
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (a *app) deleteMonitor(w http.ResponseWriter, r *http.Request) {
+	id, err := monitorID(r)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid monitor id"})
+		return
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not delete monitor"})
+		return
+	}
+	defer tx.Rollback()
+	statements := []string{
+		`DELETE FROM notification_outbox WHERE incident_id IN (SELECT id FROM incidents WHERE monitor_id=?)`,
+		`DELETE FROM incident_events WHERE incident_id IN (SELECT id FROM incidents WHERE monitor_id=?)`,
+		`DELETE FROM incidents WHERE monitor_id=?`,
+		`DELETE FROM check_results WHERE monitor_id=?`,
+		`DELETE FROM monitor_states WHERE monitor_id=?`,
+		`DELETE FROM monitor_secrets WHERE monitor_id=?`,
+	}
+	for _, statement := range statements {
+		if _, err = tx.Exec(statement, id); err != nil {
+			writeJSON(w, 500, map[string]string{"error": "could not delete monitor history"})
+			return
+		}
+	}
+	result, err := tx.Exec(`DELETE FROM monitors WHERE id=?`, id)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not delete monitor"})
+		return
+	}
+	deleted, _ := result.RowsAffected()
+	if deleted == 0 {
+		writeJSON(w, 404, map[string]string{"error": "monitor not found"})
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not delete monitor"})
+		return
+	}
+	a.runsMu.Lock()
+	delete(a.lastRuns, id)
+	a.runsMu.Unlock()
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (a *app) resetMonitorStats(w http.ResponseWriter, r *http.Request) {
+	id, err := monitorID(r)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid monitor id"})
+		return
+	}
+	if err = a.resetHistory(&id); errors.Is(err, sql.ErrNoRows) {
+		writeJSON(w, 404, map[string]string{"error": "monitor not found"})
+		return
+	} else if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not reset provider stats"})
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (a *app) resetAllStats(w http.ResponseWriter, r *http.Request) {
+	if err := a.resetHistory(nil); err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not reset all stats"})
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (a *app) resetHistory(monitorID *int64) error {
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if monitorID == nil {
+		statements := []string{
+			`DELETE FROM notification_outbox WHERE incident_id IS NOT NULL`,
+			`DELETE FROM incident_events`,
+			`DELETE FROM incidents`,
+			`DELETE FROM check_results`,
+			`DELETE FROM monitor_states`,
+		}
+		for _, statement := range statements {
+			if _, err = tx.Exec(statement); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	}
+
+	var exists int
+	if err = tx.QueryRow(`SELECT 1 FROM monitors WHERE id=?`, *monitorID).Scan(&exists); err != nil {
+		return err
+	}
+	statements := []string{
+		`DELETE FROM notification_outbox WHERE incident_id IN (SELECT id FROM incidents WHERE monitor_id=?)`,
+		`DELETE FROM incident_events WHERE incident_id IN (SELECT id FROM incidents WHERE monitor_id=?)`,
+		`DELETE FROM incidents WHERE monitor_id=?`,
+		`DELETE FROM check_results WHERE monitor_id=?`,
+		`DELETE FROM monitor_states WHERE monitor_id=?`,
+	}
+	for _, statement := range statements {
+		if _, err = tx.Exec(statement, *monitorID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (a *app) testMonitor(w http.ResponseWriter, r *http.Request) {
 	id, err := monitorID(r)
 	if err != nil {
@@ -834,7 +1162,7 @@ func (a *app) listChecks(w http.ResponseWriter, r *http.Request) {
 		ErrorDetail   *string `json:"errorDetail"`
 		CheckedAt     int64   `json:"checkedAt"`
 	}
-	var out []row
+	out := make([]row, 0)
 	for rows.Next() {
 		var x row
 		var httpStatus sql.NullInt64
@@ -918,32 +1246,82 @@ func (a *app) overview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"monitors": out, "generatedAt": time.Now().Unix()})
 }
 func (a *app) listIncidents(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.Query(`SELECT i.id,m.name,m.provider,i.opened_at,i.detected_at,i.resolved_at,i.initial_state,i.latest_state FROM incidents i JOIN monitors m ON m.id=i.monitor_id ORDER BY i.opened_at DESC LIMIT 200`)
+	rows, err := a.db.Query(`SELECT i.id,m.name,m.provider,i.opened_at,i.detected_at,i.resolved_at,i.initial_state,i.latest_state,i.summary FROM incidents i JOIN monitors m ON m.id=i.monitor_id ORDER BY i.opened_at DESC LIMIT 200`)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "could not load incidents"})
 		return
 	}
-	defer rows.Close()
+	type incidentEvent struct {
+		Type      string `json:"type"`
+		State     string `json:"state"`
+		Summary   string `json:"summary"`
+		CreatedAt int64  `json:"createdAt"`
+	}
 	type incident struct {
 		ID                        int64 `json:"id"`
 		Name, Provider            string
 		OpenedAt, DetectedAt      int64
 		ResolvedAt                *int64 `json:"resolvedAt"`
 		InitialState, LatestState string
+		Summary                   string          `json:"summary"`
+		Events                    []incidentEvent `json:"events"`
 	}
-	var out []incident
+	out := make([]incident, 0)
 	for rows.Next() {
 		var x incident
 		var resolved sql.NullInt64
-		if err = rows.Scan(&x.ID, &x.Name, &x.Provider, &x.OpenedAt, &x.DetectedAt, &resolved, &x.InitialState, &x.LatestState); err != nil {
+		var summary sql.NullString
+		if err = rows.Scan(&x.ID, &x.Name, &x.Provider, &x.OpenedAt, &x.DetectedAt, &resolved, &x.InitialState, &x.LatestState, &summary); err != nil {
+			rows.Close()
 			writeJSON(w, 500, map[string]string{"error": "could not load incidents"})
 			return
 		}
 		if resolved.Valid {
 			v := resolved.Int64
 			x.ResolvedAt = &v
+			if x.LatestState == stateHealthy {
+				x.LatestState = x.InitialState
+			}
 		}
+		if summary.Valid {
+			x.Summary = summary.String
+		} else {
+			x.Summary = incidentStateDescription(x.LatestState)
+		}
+		x.Events = make([]incidentEvent, 0)
 		out = append(out, x)
+	}
+	rows.Close()
+	for i := range out {
+		eventRows, queryErr := a.db.Query(`SELECT e.type,e.new_state,e.created_at,c.http_status,c.error_code FROM incident_events e LEFT JOIN check_results c ON c.id=e.check_id WHERE e.incident_id=? ORDER BY e.created_at ASC,e.id ASC`, out[i].ID)
+		if queryErr != nil {
+			writeJSON(w, 500, map[string]string{"error": "could not load incident log"})
+			return
+		}
+		for eventRows.Next() {
+			var event incidentEvent
+			var httpStatus sql.NullInt64
+			var errorCode sql.NullString
+			if queryErr = eventRows.Scan(&event.Type, &event.State, &event.CreatedAt, &httpStatus, &errorCode); queryErr != nil {
+				eventRows.Close()
+				writeJSON(w, 500, map[string]string{"error": "could not load incident log"})
+				return
+			}
+			if event.Type == "recovered" {
+				event.Summary = "Authenticated checks recovered and the incident was resolved."
+			} else {
+				result := checkResult{State: event.State}
+				if httpStatus.Valid {
+					result.HTTPStatus = int(httpStatus.Int64)
+				}
+				if errorCode.Valid {
+					result.ErrorCode = errorCode.String
+				}
+				event.Summary = incidentSummary(result)
+			}
+			out[i].Events = append(out[i].Events, event)
+		}
+		eventRows.Close()
 	}
 	writeJSON(w, 200, out)
 }
@@ -970,15 +1348,31 @@ func (a *app) putNtfy(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	if !strings.HasPrefix(in.URL, "https://") && !strings.HasPrefix(in.URL, "http://") {
-		writeJSON(w, 400, map[string]string{"error": "ntfy URL must use http or https"})
+	in.URL = strings.TrimSpace(in.URL)
+	if in.URL == "" {
+		result, err := a.db.Exec(`UPDATE notification_channels SET enabled=?,updated_at=? WHERE kind='ntfy'`, boolInt(in.Enabled), time.Now().Unix())
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": "could not save notification configuration"})
+			return
+		}
+		updated, _ := result.RowsAffected()
+		if updated == 0 {
+			writeJSON(w, 400, map[string]string{"error": "enter an ntfy topic URL first"})
+			return
+		}
+		writeJSON(w, 200, map[string]bool{"configured": true, "enabled": in.Enabled})
 		return
 	}
 	if len(in.URL) > 2048 {
 		writeJSON(w, 400, map[string]string{"error": "ntfy URL is too long"})
 		return
 	}
-	nonce, cipher, err := a.encrypt([]byte(in.URL), "channel:ntfy")
+	normalizedURL, err := normalizeNtfyURL(in.URL)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	nonce, cipher, err := a.encrypt([]byte(normalizedURL), "channel:ntfy")
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "could not secure notification configuration"})
 		return
@@ -991,13 +1385,37 @@ func (a *app) putNtfy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]bool{"configured": true, "enabled": in.Enabled})
 }
 
-func (a *app) enqueueNotification(incidentID int64, eventType, name, previous, next string, at time.Time) {
+func (a *app) testNtfy(w http.ResponseWriter, r *http.Request) {
+	var nonce, cipher []byte
+	err := a.db.QueryRow(`SELECT nonce,ciphertext FROM notification_channels WHERE kind='ntfy' LIMIT 1`).Scan(&nonce, &cipher)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeJSON(w, 400, map[string]string{"error": "configure an ntfy topic first"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not load notification configuration"})
+		return
+	}
+	plain, err := a.decrypt(nonce, cipher, "channel:ntfy")
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not decrypt notification configuration"})
+		return
+	}
+	err = a.sendNtfy(string(plain), "DebridUp test notification", "Your ntfy notification channel is configured correctly.", "white_check_mark", "test-"+strconv.FormatInt(time.Now().Unix(), 10))
+	if err != nil {
+		writeJSON(w, 502, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (a *app) enqueueNotification(incidentID int64, eventType, name, previous, next, summary string, at time.Time) {
 	rows, err := a.db.Query(`SELECT id FROM notification_channels WHERE kind='ntfy' AND enabled=1`)
 	if err != nil {
 		return
 	}
 	defer rows.Close()
-	message := fmt.Sprintf("%s: %s", name, strings.ReplaceAll(next, "_", " "))
+	message := fmt.Sprintf("%s: %s", name, summary)
 	if eventType == "recovered" {
 		message = fmt.Sprintf("%s: recovered", name)
 	}
@@ -1053,25 +1471,10 @@ func (a *app) deliverNtfy(j struct {
 		var payload map[string]string
 		err = json.Unmarshal([]byte(j.payload), &payload)
 		if err == nil {
-			req, requestErr := http.NewRequest(http.MethodPost, string(plain), bytes.NewBufferString(payload["message"]))
-			if requestErr != nil {
-				err = requestErr
-			} else {
-				req.Header.Set("Title", payload["title"])
-				req.Header.Set("Tags", "warning")
-				req.Header.Set("X-Event-ID", strconv.FormatInt(j.id, 10))
-				resp, requestErr := a.client.Do(req)
-				if requestErr != nil {
-					err = requestErr
-				} else {
-					_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-					resp.Body.Close()
-					if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-						_, _ = a.db.Exec(`UPDATE notification_outbox SET status='delivered',attempts=attempts+1,delivered_at=?,last_error=NULL WHERE id=?`, time.Now().Unix(), j.id)
-						return
-					}
-					err = fmt.Errorf("ntfy returned HTTP %d", resp.StatusCode)
-				}
+			err = a.sendNtfy(string(plain), payload["title"], payload["message"], "warning", strconv.FormatInt(j.id, 10))
+			if err == nil {
+				_, _ = a.db.Exec(`UPDATE notification_outbox SET status='delivered',attempts=attempts+1,delivered_at=?,last_error=NULL WHERE id=?`, time.Now().Unix(), j.id)
+				return
 			}
 		}
 	}
@@ -1084,6 +1487,44 @@ func (a *app) deliverNtfy(j struct {
 		delay = time.Hour
 	}
 	_, _ = a.db.Exec(`UPDATE notification_outbox SET status='retry',attempts=?,next_attempt_at=?,last_error=? WHERE id=?`, attempt, time.Now().Add(delay).Unix(), safeErr(err), j.id)
+}
+
+func (a *app) sendNtfy(url, title, message, tags, eventID string) error {
+	normalizedURL, err := normalizeNtfyURL(url)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, normalizedURL, bytes.NewBufferString(message))
+	if err != nil {
+		return errors.New("configured ntfy URL is invalid")
+	}
+	req.Header.Set("Title", title)
+	req.Header.Set("Tags", tags)
+	req.Header.Set("X-Event-ID", eventID)
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return errors.New("could not reach the ntfy server")
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("ntfy returned HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func normalizeNtfyURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return "", errors.New("ntfy URL must be a complete http or https URL")
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawPath = strings.TrimRight(parsed.RawPath, "/")
+	if parsed.Path == "" {
+		return "", errors.New("ntfy URL must include a topic path")
+	}
+	parsed.Fragment = ""
+	return parsed.String(), nil
 }
 func min(a, b int) int {
 	if a < b {
