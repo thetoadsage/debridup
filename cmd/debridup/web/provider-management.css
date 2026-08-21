@@ -1,0 +1,6 @@
+.card-status { display: grid; justify-items: end; gap: 8px; }
+.edit-monitor { font-size: 12px; padding: 3px 7px; }
+.close-button { font-size: 25px; line-height: 1; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 9px; }
+.dialog-actions .danger { margin-right: auto; background: #44232b; color: var(--red); }
+[hidden] { display: none !important; }

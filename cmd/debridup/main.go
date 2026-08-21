@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -240,6 +241,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /api/overview", a.auth(a.overview))
 	mux.HandleFunc("GET /api/monitors", a.auth(a.listMonitors))
 	mux.HandleFunc("POST /api/monitors", a.auth(a.createMonitor))
+	mux.HandleFunc("PUT /api/monitors/{id}", a.auth(a.updateMonitor))
+	mux.HandleFunc("DELETE /api/monitors/{id}", a.auth(a.deleteMonitor))
 	mux.HandleFunc("POST /api/monitors/{id}/test", a.auth(a.testMonitor))
 	mux.HandleFunc("GET /api/monitors/{id}/checks", a.auth(a.listChecks))
 	mux.HandleFunc("GET /api/incidents", a.auth(a.listIncidents))
@@ -793,6 +796,132 @@ func boolInt(v bool) int {
 	return 0
 }
 func monitorID(r *http.Request) (int64, error) { return strconv.ParseInt(r.PathValue("id"), 10, 64) }
+func (a *app) updateMonitor(w http.ResponseWriter, r *http.Request) {
+	id, err := monitorID(r)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid monitor id"})
+		return
+	}
+	var in struct {
+		Name              string `json:"name"`
+		APIKey            string `json:"apiKey"`
+		Enabled           bool   `json:"enabled"`
+		IntervalSeconds   int    `json:"intervalSeconds"`
+		TimeoutSeconds    int    `json:"timeoutSeconds"`
+		FailureThreshold  int    `json:"failureThreshold"`
+		RecoveryThreshold int    `json:"recoveryThreshold"`
+		PublicCheck       bool   `json:"publicCheck"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	in.Name = strings.TrimSpace(in.Name)
+	in.APIKey = strings.TrimSpace(in.APIKey)
+	if len(in.Name) < 1 || len(in.Name) > 80 {
+		writeJSON(w, 400, map[string]string{"error": "name is required and must be 80 characters or fewer"})
+		return
+	}
+	if in.APIKey != "" && len(in.APIKey) < 8 {
+		writeJSON(w, 400, map[string]string{"error": "replacement API key is too short"})
+		return
+	}
+	if in.IntervalSeconds < 15 || in.IntervalSeconds > 3600 || in.TimeoutSeconds < 3 || in.TimeoutSeconds > 60 || in.FailureThreshold < 1 || in.FailureThreshold > 20 || in.RecoveryThreshold < 1 || in.RecoveryThreshold > 20 {
+		writeJSON(w, 400, map[string]string{"error": "monitor values are out of range"})
+		return
+	}
+	var nonce, cipher []byte
+	if in.APIKey != "" {
+		nonce, cipher, err = a.encrypt([]byte(in.APIKey), "monitor:"+strconv.FormatInt(id, 10))
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": "could not secure replacement credential"})
+			return
+		}
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not update monitor"})
+		return
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE monitors SET name=?,enabled=?,interval_seconds=?,timeout_seconds=?,failure_threshold=?,recovery_threshold=?,public_check=?,updated_at=? WHERE id=?`, in.Name, boolInt(in.Enabled), in.IntervalSeconds, in.TimeoutSeconds, in.FailureThreshold, in.RecoveryThreshold, boolInt(in.PublicCheck), time.Now().Unix(), id)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not update monitor"})
+		return
+	}
+	updated, _ := result.RowsAffected()
+	if updated == 0 {
+		writeJSON(w, 404, map[string]string{"error": "monitor not found"})
+		return
+	}
+	if in.APIKey != "" {
+		_, err = tx.Exec(`INSERT INTO monitor_secrets(monitor_id,nonce,ciphertext,updated_at) VALUES(?,?,?,?) ON CONFLICT(monitor_id) DO UPDATE SET nonce=excluded.nonce,ciphertext=excluded.ciphertext,updated_at=excluded.updated_at`, id, nonce, cipher, time.Now().Unix())
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": "could not update credential"})
+			return
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not update monitor"})
+		return
+	}
+	if in.Enabled {
+		m, loadErr := a.monitorByID(id)
+		if loadErr == nil {
+			a.runsMu.Lock()
+			delete(a.lastRuns, id)
+			a.runsMu.Unlock()
+			go a.runMonitor(m)
+		}
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (a *app) deleteMonitor(w http.ResponseWriter, r *http.Request) {
+	id, err := monitorID(r)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid monitor id"})
+		return
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not delete monitor"})
+		return
+	}
+	defer tx.Rollback()
+	statements := []string{
+		`DELETE FROM notification_outbox WHERE incident_id IN (SELECT id FROM incidents WHERE monitor_id=?)`,
+		`DELETE FROM incident_events WHERE incident_id IN (SELECT id FROM incidents WHERE monitor_id=?)`,
+		`DELETE FROM incidents WHERE monitor_id=?`,
+		`DELETE FROM check_results WHERE monitor_id=?`,
+		`DELETE FROM monitor_states WHERE monitor_id=?`,
+		`DELETE FROM monitor_secrets WHERE monitor_id=?`,
+	}
+	for _, statement := range statements {
+		if _, err = tx.Exec(statement, id); err != nil {
+			writeJSON(w, 500, map[string]string{"error": "could not delete monitor history"})
+			return
+		}
+	}
+	result, err := tx.Exec(`DELETE FROM monitors WHERE id=?`, id)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not delete monitor"})
+		return
+	}
+	deleted, _ := result.RowsAffected()
+	if deleted == 0 {
+		writeJSON(w, 404, map[string]string{"error": "monitor not found"})
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not delete monitor"})
+		return
+	}
+	a.runsMu.Lock()
+	delete(a.lastRuns, id)
+	a.runsMu.Unlock()
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
 func (a *app) testMonitor(w http.ResponseWriter, r *http.Request) {
 	id, err := monitorID(r)
 	if err != nil {
@@ -988,15 +1117,16 @@ func (a *app) putNtfy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]bool{"configured": true, "enabled": in.Enabled})
 		return
 	}
-	if !strings.HasPrefix(in.URL, "https://") && !strings.HasPrefix(in.URL, "http://") {
-		writeJSON(w, 400, map[string]string{"error": "ntfy URL must use http or https"})
-		return
-	}
 	if len(in.URL) > 2048 {
 		writeJSON(w, 400, map[string]string{"error": "ntfy URL is too long"})
 		return
 	}
-	nonce, cipher, err := a.encrypt([]byte(in.URL), "channel:ntfy")
+	normalizedURL, err := normalizeNtfyURL(in.URL)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	nonce, cipher, err := a.encrypt([]byte(normalizedURL), "channel:ntfy")
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "could not secure notification configuration"})
 		return
@@ -1114,7 +1244,11 @@ func (a *app) deliverNtfy(j struct {
 }
 
 func (a *app) sendNtfy(url, title, message, tags, eventID string) error {
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBufferString(message))
+	normalizedURL, err := normalizeNtfyURL(url)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, normalizedURL, bytes.NewBufferString(message))
 	if err != nil {
 		return errors.New("configured ntfy URL is invalid")
 	}
@@ -1131,6 +1265,20 @@ func (a *app) sendNtfy(url, title, message, tags, eventID string) error {
 		return fmt.Errorf("ntfy returned HTTP %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func normalizeNtfyURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return "", errors.New("ntfy URL must be a complete http or https URL")
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawPath = strings.TrimRight(parsed.RawPath, "/")
+	if parsed.Path == "" {
+		return "", errors.New("ntfy URL must include a topic path")
+	}
+	parsed.Fragment = ""
+	return parsed.String(), nil
 }
 func min(a, b int) int {
 	if a < b {

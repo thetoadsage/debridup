@@ -20,7 +20,7 @@ func TestSendNtfy(t *testing.T) {
 	defer server.Close()
 
 	a := &app{client: server.Client()}
-	err := a.sendNtfy(server.URL, "DebridUp test", "It works", "white_check_mark", "test-1")
+	err := a.sendNtfy(server.URL+"/topic/", "DebridUp test", "It works", "white_check_mark", "test-1")
 	if err != nil {
 		t.Fatalf("sendNtfy returned an error: %v", err)
 	}
@@ -36,8 +36,21 @@ func TestSendNtfyReportsHTTPFailure(t *testing.T) {
 	defer server.Close()
 
 	a := &app{client: server.Client()}
-	err := a.sendNtfy(server.URL, "Test", "Test", "warning", "test-2")
+	err := a.sendNtfy(server.URL+"/topic", "Test", "Test", "warning", "test-2")
 	if err == nil || err.Error() != "ntfy returned HTTP 401" {
 		t.Fatalf("expected safe HTTP status error, got %v", err)
+	}
+}
+
+func TestNormalizeNtfyURL(t *testing.T) {
+	got, err := normalizeNtfyURL(" https://ntfy.sh/private-topic/ ")
+	if err != nil {
+		t.Fatalf("normalizeNtfyURL returned an error: %v", err)
+	}
+	if got != "https://ntfy.sh/private-topic" {
+		t.Fatalf("expected trailing slash to be removed, got %q", got)
+	}
+	if _, err = normalizeNtfyURL("https://ntfy.sh/"); err == nil {
+		t.Fatal("expected a topic-less ntfy URL to be rejected")
 	}
 }
