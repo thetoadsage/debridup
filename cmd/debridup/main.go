@@ -972,6 +972,21 @@ func (a *app) putNtfy(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
+	in.URL = strings.TrimSpace(in.URL)
+	if in.URL == "" {
+		result, err := a.db.Exec(`UPDATE notification_channels SET enabled=?,updated_at=? WHERE kind='ntfy'`, boolInt(in.Enabled), time.Now().Unix())
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": "could not save notification configuration"})
+			return
+		}
+		updated, _ := result.RowsAffected()
+		if updated == 0 {
+			writeJSON(w, 400, map[string]string{"error": "enter an ntfy topic URL first"})
+			return
+		}
+		writeJSON(w, 200, map[string]bool{"configured": true, "enabled": in.Enabled})
+		return
+	}
 	if !strings.HasPrefix(in.URL, "https://") && !strings.HasPrefix(in.URL, "http://") {
 		writeJSON(w, 400, map[string]string{"error": "ntfy URL must use http or https"})
 		return
