@@ -54,3 +54,23 @@ func TestNormalizeNtfyURL(t *testing.T) {
 		t.Fatal("expected a topic-less ntfy URL to be rejected")
 	}
 }
+
+func TestIncidentSummary(t *testing.T) {
+	tests := []struct {
+		name   string
+		result checkResult
+		want   string
+	}{
+		{"authentication", checkResult{State: stateAuthFailed}, "The provider rejected the configured API key. Verify or replace the credential."},
+		{"timeout", checkResult{State: stateConnection, ErrorCode: "timeout"}, "The authenticated API request timed out before the provider responded."},
+		{"server status", checkResult{State: stateAPI, ErrorCode: "server_error", HTTPStatus: 503}, "The provider API returned HTTP 503, indicating a server-side failure."},
+		{"invalid response", checkResult{State: stateAPI, ErrorCode: "invalid_response"}, "The provider API was reachable, but its response was invalid or could not be understood."},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := incidentSummary(test.result); got != test.want {
+				t.Fatalf("incidentSummary() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}

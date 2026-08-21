@@ -573,7 +573,7 @@ func (a *app) recordResult(m monitor, source string, r checkResult) (int64, erro
 			ms.Current = r.State
 			ms.StateSince = ms.FailureStartedAt
 			eventType = "opened"
-			incidentID, err = openIncident(tx, m.ID, ms.FailureStartedAt, r.CheckedAt.Unix(), r.State, checkID)
+			incidentID, err = openIncident(tx, m.ID, ms.FailureStartedAt, r.CheckedAt.Unix(), r.State, incidentSummary(r), checkID)
 			if err != nil {
 				return 0, err
 			}
@@ -581,7 +581,7 @@ func (a *app) recordResult(m monitor, source string, r checkResult) (int64, erro
 			ms.Current = r.State
 			ms.StateSince = r.CheckedAt.Unix()
 			eventType = "state_changed"
-			incidentID, err = changeIncident(tx, m.ID, previous, r.State, r.CheckedAt.Unix(), checkID)
+			incidentID, err = changeIncident(tx, m.ID, previous, r.State, incidentSummary(r), r.CheckedAt.Unix(), checkID)
 			if err != nil {
 				return 0, err
 			}
@@ -595,7 +595,7 @@ func (a *app) recordResult(m monitor, source string, r checkResult) (int64, erro
 		return 0, err
 	}
 	if eventType != "" {
-		a.enqueueNotification(incidentID, eventType, m.Name, previous, ms.Current, r.CheckedAt)
+		a.enqueueNotification(incidentID, eventType, m.Name, previous, ms.Current, incidentSummary(r), r.CheckedAt)
 	}
 	return checkID, nil
 }
@@ -620,8 +620,8 @@ func stateFor(tx *sql.Tx, id int64, now int64) (monitorState, error) {
 	}
 	return s, err
 }
-func openIncident(tx *sql.Tx, monitorID, opened, detected int64, state string, checkID int64) (int64, error) {
-	res, err := tx.Exec(`INSERT INTO incidents(monitor_id,opened_at,detected_at,initial_state,latest_state) VALUES(?,?,?,?,?)`, monitorID, opened, detected, state, state)
+func openIncident(tx *sql.Tx, monitorID, opened, detected int64, state, summary string, checkID int64) (int64, error) {
+	res, err := tx.Exec(`INSERT INTO incidents(monitor_id,opened_at,detected_at,initial_state,latest_state,summary) VALUES(?,?,?,?,?,?)`, monitorID, opened, detected, state, state, summary)
 	if err != nil {
 		return 0, err
 	}
@@ -635,25 +635,73 @@ func resolveIncident(tx *sql.Tx, monitorID, at, checkID int64) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	_, err = tx.Exec(`UPDATE incidents SET resolved_at=?,latest_state=? WHERE id=?`, at, stateHealthy, id)
+	_, err = tx.Exec(`UPDATE incidents SET resolved_at=? WHERE id=?`, at, id)
 	if err != nil {
 		return 0, err
 	}
 	_, err = tx.Exec(`INSERT INTO incident_events(incident_id,type,new_state,created_at,check_id) VALUES(?,?,?,?,?)`, id, "recovered", stateHealthy, at, checkID)
 	return id, err
 }
-func changeIncident(tx *sql.Tx, monitorID int64, previous, next string, at, checkID int64) (int64, error) {
+func changeIncident(tx *sql.Tx, monitorID int64, previous, next, summary string, at, checkID int64) (int64, error) {
 	var id int64
 	err := tx.QueryRow(`SELECT id FROM incidents WHERE monitor_id=? AND resolved_at IS NULL ORDER BY id DESC LIMIT 1`, monitorID).Scan(&id)
 	if err != nil {
 		return 0, err
 	}
-	_, err = tx.Exec(`UPDATE incidents SET latest_state=? WHERE id=?`, next, id)
+	_, err = tx.Exec(`UPDATE incidents SET latest_state=?,summary=? WHERE id=?`, next, summary, id)
 	if err != nil {
 		return 0, err
 	}
 	_, err = tx.Exec(`INSERT INTO incident_events(incident_id,type,previous_state,new_state,created_at,check_id) VALUES(?,?,?,?,?,?)`, id, "state_changed", previous, next, at, checkID)
 	return id, err
+}
+
+func incidentSummary(r checkResult) string {
+	switch r.State {
+	case stateAuthFailed:
+		return "The provider rejected the configured API key. Verify or replace the credential."
+	case stateConnection:
+		if r.ErrorCode == "timeout" {
+			return "The authenticated API request timed out before the provider responded."
+		}
+		return "DebridUp could not establish a connection to the provider API."
+	case stateAPI:
+		switch r.ErrorCode {
+		case "server_error":
+			if r.HTTPStatus != 0 {
+				return fmt.Sprintf("The provider API returned HTTP %d, indicating a server-side failure.", r.HTTPStatus)
+			}
+			return "The provider API reported a server-side failure."
+		case "unexpected_status":
+			if r.HTTPStatus != 0 {
+				return fmt.Sprintf("The provider API returned the unexpected HTTP status %d.", r.HTTPStatus)
+			}
+			return "The provider API returned an unexpected HTTP status."
+		case "invalid_response":
+			return "The provider API was reachable, but its response was invalid or could not be understood."
+		case "api_error":
+			return "The provider API returned an application-level error."
+		default:
+			return "The provider API was reachable but did not complete the health check successfully."
+		}
+	case stateHealthy:
+		return "The authenticated provider check succeeded again."
+	default:
+		return "The authenticated provider check failed."
+	}
+}
+
+func incidentStateDescription(state string) string {
+	switch state {
+	case stateAuthFailed:
+		return "Authentication is failing. Verify or replace the configured API key."
+	case stateConnection:
+		return "DebridUp could not connect to the provider API."
+	case stateAPI:
+		return "The provider API returned an error or invalid response."
+	default:
+		return "The authenticated provider check failed."
+	}
 }
 
 func (a *app) monitors() ([]monitor, error) {
@@ -1050,32 +1098,82 @@ func (a *app) overview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"monitors": out, "generatedAt": time.Now().Unix()})
 }
 func (a *app) listIncidents(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.Query(`SELECT i.id,m.name,m.provider,i.opened_at,i.detected_at,i.resolved_at,i.initial_state,i.latest_state FROM incidents i JOIN monitors m ON m.id=i.monitor_id ORDER BY i.opened_at DESC LIMIT 200`)
+	rows, err := a.db.Query(`SELECT i.id,m.name,m.provider,i.opened_at,i.detected_at,i.resolved_at,i.initial_state,i.latest_state,i.summary FROM incidents i JOIN monitors m ON m.id=i.monitor_id ORDER BY i.opened_at DESC LIMIT 200`)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "could not load incidents"})
 		return
 	}
-	defer rows.Close()
+	type incidentEvent struct {
+		Type      string `json:"type"`
+		State     string `json:"state"`
+		Summary   string `json:"summary"`
+		CreatedAt int64  `json:"createdAt"`
+	}
 	type incident struct {
 		ID                        int64 `json:"id"`
 		Name, Provider            string
 		OpenedAt, DetectedAt      int64
 		ResolvedAt                *int64 `json:"resolvedAt"`
 		InitialState, LatestState string
+		Summary                   string          `json:"summary"`
+		Events                    []incidentEvent `json:"events"`
 	}
 	out := make([]incident, 0)
 	for rows.Next() {
 		var x incident
 		var resolved sql.NullInt64
-		if err = rows.Scan(&x.ID, &x.Name, &x.Provider, &x.OpenedAt, &x.DetectedAt, &resolved, &x.InitialState, &x.LatestState); err != nil {
+		var summary sql.NullString
+		if err = rows.Scan(&x.ID, &x.Name, &x.Provider, &x.OpenedAt, &x.DetectedAt, &resolved, &x.InitialState, &x.LatestState, &summary); err != nil {
+			rows.Close()
 			writeJSON(w, 500, map[string]string{"error": "could not load incidents"})
 			return
 		}
 		if resolved.Valid {
 			v := resolved.Int64
 			x.ResolvedAt = &v
+			if x.LatestState == stateHealthy {
+				x.LatestState = x.InitialState
+			}
 		}
+		if summary.Valid {
+			x.Summary = summary.String
+		} else {
+			x.Summary = incidentStateDescription(x.LatestState)
+		}
+		x.Events = make([]incidentEvent, 0)
 		out = append(out, x)
+	}
+	rows.Close()
+	for i := range out {
+		eventRows, queryErr := a.db.Query(`SELECT e.type,e.new_state,e.created_at,c.http_status,c.error_code FROM incident_events e LEFT JOIN check_results c ON c.id=e.check_id WHERE e.incident_id=? ORDER BY e.created_at ASC,e.id ASC`, out[i].ID)
+		if queryErr != nil {
+			writeJSON(w, 500, map[string]string{"error": "could not load incident log"})
+			return
+		}
+		for eventRows.Next() {
+			var event incidentEvent
+			var httpStatus sql.NullInt64
+			var errorCode sql.NullString
+			if queryErr = eventRows.Scan(&event.Type, &event.State, &event.CreatedAt, &httpStatus, &errorCode); queryErr != nil {
+				eventRows.Close()
+				writeJSON(w, 500, map[string]string{"error": "could not load incident log"})
+				return
+			}
+			if event.Type == "recovered" {
+				event.Summary = "Authenticated checks recovered and the incident was resolved."
+			} else {
+				result := checkResult{State: event.State}
+				if httpStatus.Valid {
+					result.HTTPStatus = int(httpStatus.Int64)
+				}
+				if errorCode.Valid {
+					result.ErrorCode = errorCode.String
+				}
+				event.Summary = incidentSummary(result)
+			}
+			out[i].Events = append(out[i].Events, event)
+		}
+		eventRows.Close()
 	}
 	writeJSON(w, 200, out)
 }
@@ -1163,13 +1261,13 @@ func (a *app) testNtfy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
-func (a *app) enqueueNotification(incidentID int64, eventType, name, previous, next string, at time.Time) {
+func (a *app) enqueueNotification(incidentID int64, eventType, name, previous, next, summary string, at time.Time) {
 	rows, err := a.db.Query(`SELECT id FROM notification_channels WHERE kind='ntfy' AND enabled=1`)
 	if err != nil {
 		return
 	}
 	defer rows.Close()
-	message := fmt.Sprintf("%s: %s", name, strings.ReplaceAll(next, "_", " "))
+	message := fmt.Sprintf("%s: %s", name, summary)
 	if eventType == "recovered" {
 		message = fmt.Sprintf("%s: recovered", name)
 	}
