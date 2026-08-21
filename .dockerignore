@@ -1,0 +1,6 @@
+.git
+.env
+data
+secrets/*
+!secrets/.gitkeep
+debridup

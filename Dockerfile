@@ -6,10 +6,12 @@ COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/debridup ./cmd/debridup
 
 FROM alpine:3.21
-RUN addgroup -S debridup && adduser -S -G debridup -h /data debridup
+RUN apk add --no-cache su-exec \
+  && addgroup -S debridup \
+  && adduser -S -G debridup -h /data debridup
 COPY --from=build /out/debridup /usr/local/bin/debridup
-USER debridup
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 VOLUME ["/data"]
 ENV DEBRIDUP_DATA_DIR=/data
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/debridup"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint"]

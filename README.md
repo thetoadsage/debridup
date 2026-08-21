@@ -25,6 +25,7 @@ Open `http://localhost:8080`. Use a TLS reverse proxy before exposing the dashbo
 
 - API keys and notification endpoints are encrypted with XChaCha20-Poly1305 before reaching SQLite.
 - The encryption key is loaded from a file/secret and is never persisted in the database.
+- The container entrypoint reads the root-mounted Docker secret, then drops privileges before starting the application.
 - Secrets are write-only in the API and are never sent to the browser.
 - The app is single-admin; its initial password is supplied through `DEBRIDUP_ADMIN_PASSWORD` and stored as an Argon2id hash.
 - SQLite runs in WAL mode. Back up using SQLite's online backup mechanism, not by copying only the database file while the app is live.
