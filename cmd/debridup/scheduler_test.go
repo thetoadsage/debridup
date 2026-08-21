@@ -159,3 +159,18 @@ func TestRunCoordinatorOverdueRunDoesNotStarveLaterMonitor(t *testing.T) {
 		t.Fatalf("later monitor after release = %v, want accepted", got)
 	}
 }
+
+func TestRunCoordinatorCompletedManualRunDelaysScheduledRun(t *testing.T) {
+	c := newRunCoordinator(1)
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	if got := c.ClaimManual(1, now); got != claimAccepted {
+		t.Fatalf("manual claim = %v, want accepted", got)
+	}
+	c.Release(1)
+	if got := c.Claim(1, now.Add(5*time.Second), time.Minute); got != claimNotDue {
+		t.Fatalf("next scheduler tick = %v, want not due", got)
+	}
+	if got := c.Claim(1, now.Add(time.Minute), time.Minute); got != claimAccepted {
+		t.Fatalf("claim after interval = %v, want accepted", got)
+	}
+}

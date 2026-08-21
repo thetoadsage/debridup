@@ -76,7 +76,7 @@ func (c *runCoordinator) Claim(id int64, now time.Time, interval time.Duration) 
 	return claimAccepted
 }
 
-func (c *runCoordinator) ClaimManual(id int64) runClaimResult {
+func (c *runCoordinator) ClaimManual(id int64, now time.Time) runClaimResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -86,6 +86,7 @@ func (c *runCoordinator) ClaimManual(id int64) runClaimResult {
 	if c.active >= c.limit {
 		return claimCapacity
 	}
+	c.lastRuns[id] = now
 	c.inFlight[id] = struct{}{}
 	c.active++
 	return claimAccepted

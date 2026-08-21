@@ -1050,7 +1050,7 @@ func (a *app) testMonitor(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "monitor has no credential"})
 		return
 	}
-	switch a.runs.ClaimManual(m.ID) {
+	switch a.runs.ClaimManual(m.ID, time.Now()) {
 	case claimOverlap:
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "monitor check already in progress"})
 		return
