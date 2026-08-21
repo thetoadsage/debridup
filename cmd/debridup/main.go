@@ -82,7 +82,7 @@ var providerDefinitions = map[string]providerDefinition{
 	"premiumize": {Endpoint: "https://www.premiumize.me/api/account/info", PublicEndpoint: "https://premiumize.reamaze.com/status", Method: http.MethodGet},
 	"alldebrid":  {Endpoint: "https://api.alldebrid.com/v4/user", PublicEndpoint: "https://api.alldebrid.com/v4/ping", Method: http.MethodGet},
 	"realdebrid": {Endpoint: "https://api.real-debrid.com/rest/1.0/user", PublicEndpoint: "https://api.real-debrid.com/rest/1.0/time", Method: http.MethodGet},
-	"torrin":     {Endpoint: "https://torrin.app/api/jobs", PublicEndpoint: "https://torrin.app/api/sites", Method: http.MethodGet},
+	"torrin":     {Endpoint: "https://torrin.app/api/stats", PublicEndpoint: "https://torrin.app/api/stats/public", Method: http.MethodGet},
 	"pikpak":     {Endpoint: "https://user.mypikpak.com/v1/user/me", PublicEndpoint: "https://mypikpak.com/", Method: http.MethodGet},
 	"offcloud":   {Endpoint: "https://offcloud.com/api/account/info", PublicEndpoint: "https://offcloud.com/", Method: http.MethodGet},
 	"debridlink": {Endpoint: "https://debrid-link.com/api/v2/account/infos", PublicEndpoint: "https://www.debrid-link.com/webapp/status", Method: http.MethodGet},
@@ -304,8 +304,10 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/monitors", a.auth(a.createMonitor))
 	mux.HandleFunc("PUT /api/monitors/{id}", a.auth(a.updateMonitor))
 	mux.HandleFunc("DELETE /api/monitors/{id}", a.auth(a.deleteMonitor))
+	mux.HandleFunc("POST /api/monitors/{id}/reset", a.auth(a.resetMonitorStats))
 	mux.HandleFunc("POST /api/monitors/{id}/test", a.auth(a.testMonitor))
 	mux.HandleFunc("GET /api/monitors/{id}/checks", a.auth(a.listChecks))
+	mux.HandleFunc("POST /api/stats/reset", a.auth(a.resetAllStats))
 	mux.HandleFunc("GET /api/incidents", a.auth(a.listIncidents))
 	mux.HandleFunc("GET /api/notifications/ntfy", a.auth(a.getNtfy))
 	mux.HandleFunc("PUT /api/notifications/ntfy", a.auth(a.putNtfy))
@@ -1048,6 +1050,72 @@ func (a *app) deleteMonitor(w http.ResponseWriter, r *http.Request) {
 	delete(a.lastRuns, id)
 	a.runsMu.Unlock()
 	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (a *app) resetMonitorStats(w http.ResponseWriter, r *http.Request) {
+	id, err := monitorID(r)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid monitor id"})
+		return
+	}
+	if err = a.resetHistory(&id); errors.Is(err, sql.ErrNoRows) {
+		writeJSON(w, 404, map[string]string{"error": "monitor not found"})
+		return
+	} else if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not reset provider stats"})
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (a *app) resetAllStats(w http.ResponseWriter, r *http.Request) {
+	if err := a.resetHistory(nil); err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not reset all stats"})
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (a *app) resetHistory(monitorID *int64) error {
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if monitorID == nil {
+		statements := []string{
+			`DELETE FROM notification_outbox WHERE incident_id IS NOT NULL`,
+			`DELETE FROM incident_events`,
+			`DELETE FROM incidents`,
+			`DELETE FROM check_results`,
+			`DELETE FROM monitor_states`,
+		}
+		for _, statement := range statements {
+			if _, err = tx.Exec(statement); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	}
+
+	var exists int
+	if err = tx.QueryRow(`SELECT 1 FROM monitors WHERE id=?`, *monitorID).Scan(&exists); err != nil {
+		return err
+	}
+	statements := []string{
+		`DELETE FROM notification_outbox WHERE incident_id IN (SELECT id FROM incidents WHERE monitor_id=?)`,
+		`DELETE FROM incident_events WHERE incident_id IN (SELECT id FROM incidents WHERE monitor_id=?)`,
+		`DELETE FROM incidents WHERE monitor_id=?`,
+		`DELETE FROM check_results WHERE monitor_id=?`,
+		`DELETE FROM monitor_states WHERE monitor_id=?`,
+	}
+	for _, statement := range statements {
+		if _, err = tx.Exec(statement, *monitorID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (a *app) testMonitor(w http.ResponseWriter, r *http.Request) {

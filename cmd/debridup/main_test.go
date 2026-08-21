@@ -89,6 +89,9 @@ func TestProviderDefinitions(t *testing.T) {
 			t.Fatalf("provider %q must use HTTPS endpoints: %#v", id, provider)
 		}
 	}
+	if got := providerDefinitions["torrin"]; got.Endpoint != "https://torrin.app/api/stats" || got.PublicEndpoint != "https://torrin.app/api/stats/public" {
+		t.Fatalf("Torrin must use its authenticated and public stats endpoints: %#v", got)
+	}
 }
 
 func TestClassifyProviderPayload(t *testing.T) {
@@ -104,6 +107,7 @@ func TestClassifyProviderPayload(t *testing.T) {
 		{"offcloud invalid key", "offcloud", map[string]any{"error": "Invalid API key"}, stateAuthFailed, "authentication_rejected"},
 		{"deepbrid application failure", "deepbrid", map[string]any{"error": float64(1), "message": "Internal failure"}, stateAPI, "api_error"},
 		{"generic account response", "realdebrid", map[string]any{"id": float64(42)}, "", ""},
+		{"torrin stats response", "torrin", map[string]any{"stats": map[string]any{}, "plan": map[string]any{}}, "", ""},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -178,4 +182,82 @@ func TestMigrateExpandsProviderConstraint(t *testing.T) {
 	if rows.Next() {
 		t.Fatal("provider constraint migration left a foreign key violation")
 	}
+}
+
+func TestResetHistoryScopesAndPreservesConfiguration(t *testing.T) {
+	db, err := sql.Open("sqlite", "file:reset-history?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+	a := &app{db: db}
+	if err = a.migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	for id, provider := range []string{"torbox", "torrin"} {
+		monitorID := id + 1
+		if _, err = db.Exec(`INSERT INTO monitors(id,provider,name,created_at,updated_at) VALUES(?,?,?,?,?)`, monitorID, provider, provider, 1, 1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(`INSERT INTO monitor_secrets(monitor_id,nonce,ciphertext,updated_at) VALUES(?,?,?,?)`, monitorID, []byte{1}, []byte{2}, 1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(`INSERT INTO monitor_states(monitor_id,current_state,state_since,last_raw_state,last_check_at) VALUES(?,?,?,?,?)`, monitorID, stateAPI, 1, stateAPI, 1); err != nil {
+			t.Fatal(err)
+		}
+		check, err := db.Exec(`INSERT INTO check_results(monitor_id,source,state,duration_ms,checked_at) VALUES(?,?,?,?,?)`, monitorID, "authenticated", stateAPI, 10, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkID, _ := check.LastInsertId()
+		incident, err := db.Exec(`INSERT INTO incidents(monitor_id,opened_at,detected_at,initial_state,latest_state,summary) VALUES(?,?,?,?,?,?)`, monitorID, 1, 1, stateAPI, stateAPI, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		incidentID, _ := incident.LastInsertId()
+		if _, err = db.Exec(`INSERT INTO incident_events(incident_id,type,new_state,created_at,check_id) VALUES(?,?,?,?,?)`, incidentID, "opened", stateAPI, 1, checkID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = db.Exec(`INSERT INTO notification_channels(id,kind,updated_at) VALUES(1,'ntfy',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO notification_outbox(channel_id,incident_id,event_type,payload,next_attempt_at) SELECT 1,id,'opened','{}',1 FROM incidents`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO notification_outbox(channel_id,event_type,payload,next_attempt_at) VALUES(1,'test','{}',1)`); err != nil {
+		t.Fatal(err)
+	}
+
+	firstID := int64(1)
+	if err = a.resetHistory(&firstID); err != nil {
+		t.Fatalf("reset provider history: %v", err)
+	}
+	assertCount := func(query string, want int) {
+		t.Helper()
+		var got int
+		if err := db.QueryRow(query).Scan(&got); err != nil || got != want {
+			t.Fatalf("%s: count=%d err=%v, want %d", query, got, err, want)
+		}
+	}
+	assertCount(`SELECT COUNT(*) FROM check_results WHERE monitor_id=1`, 0)
+	assertCount(`SELECT COUNT(*) FROM incidents WHERE monitor_id=1`, 0)
+	assertCount(`SELECT COUNT(*) FROM monitor_states WHERE monitor_id=1`, 0)
+	assertCount(`SELECT COUNT(*) FROM check_results WHERE monitor_id=2`, 1)
+	assertCount(`SELECT COUNT(*) FROM monitors`, 2)
+	assertCount(`SELECT COUNT(*) FROM monitor_secrets`, 2)
+
+	if err = a.resetHistory(nil); err != nil {
+		t.Fatalf("reset all history: %v", err)
+	}
+	assertCount(`SELECT COUNT(*) FROM check_results`, 0)
+	assertCount(`SELECT COUNT(*) FROM incidents`, 0)
+	assertCount(`SELECT COUNT(*) FROM incident_events`, 0)
+	assertCount(`SELECT COUNT(*) FROM monitor_states`, 0)
+	assertCount(`SELECT COUNT(*) FROM notification_outbox WHERE incident_id IS NOT NULL`, 0)
+	assertCount(`SELECT COUNT(*) FROM notification_outbox WHERE event_type='test'`, 1)
+	assertCount(`SELECT COUNT(*) FROM monitors`, 2)
+	assertCount(`SELECT COUNT(*) FROM monitor_secrets`, 2)
 }

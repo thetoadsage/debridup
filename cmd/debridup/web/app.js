@@ -114,6 +114,7 @@ function resetMonitorDialog() {
   $('#monitor-dialog-title').textContent = 'Add provider';
   $('#monitor-submit').textContent = 'Add provider';
   $('#delete-monitor').hidden = true;
+  $('#reset-monitor-stats').hidden = true;
   $('#monitor-error').textContent = '';
 }
 
@@ -148,6 +149,7 @@ function openEditMonitor(config) {
   $('#monitor-dialog-title').textContent = 'Edit provider';
   $('#monitor-submit').textContent = 'Save changes';
   $('#delete-monitor').hidden = false;
+  $('#reset-monitor-stats').hidden = false;
   $('#monitor-dialog').showModal();
 }
 
@@ -167,6 +169,8 @@ $('#monitor-form').addEventListener('submit', async event => {
   try { await api(editingMonitorID ? `/api/monitors/${editingMonitorID}` : '/api/monitors',{method:editingMonitorID ? 'PUT' : 'POST',body:JSON.stringify(payload)}); $('#monitor-dialog').close(); resetMonitorDialog(); await refresh(); } catch (error) { $('#monitor-error').textContent = error.message; }
 });
 $('#delete-monitor').addEventListener('click', async () => { if (!editingMonitorID) return; const config = monitorConfigs.get(editingMonitorID); if (!window.confirm(`Delete ${config?.name || 'this provider'}? This permanently removes its checks and incident history.`)) return; try { await api(`/api/monitors/${editingMonitorID}`, {method:'DELETE'}); $('#monitor-dialog').close(); resetMonitorDialog(); await refresh(); } catch(error) { $('#monitor-error').textContent = error.message; } });
+$('#reset-monitor-stats').addEventListener('click', async () => { if (!editingMonitorID) return; const config = monitorConfigs.get(editingMonitorID); if (!window.confirm(`Reset all stats for ${config?.name || 'this provider'}? Its checks and incident history will be permanently cleared. Provider settings and credentials will be kept.`)) return; try { await api(`/api/monitors/${editingMonitorID}/reset`, {method:'POST'}); $('#monitor-dialog').close(); resetMonitorDialog(); await refresh(); } catch(error) { $('#monitor-error').textContent = error.message; } });
+$('#reset-all-stats').addEventListener('click', async () => { if (!window.confirm('Reset stats for every provider? All checks and incident history will be permanently cleared. Provider settings, credentials, and notification settings will be kept.')) return; const button = $('#reset-all-stats'); button.disabled = true; try { await api('/api/stats/reset', {method:'POST'}); await refresh(); } catch(error) { showError(error); } finally { button.disabled = false; } });
 $('#ntfy-form').addEventListener('submit', async event => { event.preventDefault(); const url=$('#ntfy-url').value.trim(); if (!url && !ntfyConfigured) { notificationMessage('Enter the complete ntfy topic URL first.', 'error'); return; } try { notificationMessage('Saving…'); const result = await api('/api/notifications/ntfy',{method:'PUT',body:JSON.stringify({url,enabled:$('#ntfy-enabled').checked})}); $('#ntfy-url').value=''; renderNtfy(result); notificationMessage(result.enabled ? 'Settings saved. Incident notifications are enabled.' : 'Settings saved. The channel is configured but disabled.', 'success'); } catch(error) { notificationMessage(error.message, 'error'); } });
 $('#ntfy-test').addEventListener('click', async () => { const button = $('#ntfy-test'); button.disabled = true; notificationMessage('Sending test notification…'); try { await api('/api/notifications/ntfy/test', {method:'POST'}); notificationMessage('Test notification delivered successfully.', 'success'); } catch(error) { notificationMessage(`Test failed: ${error.message}`, 'error'); } finally { button.disabled = !ntfyConfigured; } });
 function showError(error) { console.error(error); $('#updated').textContent = `Unable to refresh dashboard: ${error.message || 'unknown error'}`; }
