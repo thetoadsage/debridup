@@ -28,6 +28,12 @@ The published image is `ghcr.io/thetoadsage/debridup:latest` for both AMD64 and 
 
 To build directly from source instead, run `docker build -t debridup:local .`.
 
+## Unraid
+
+An importable Unraid Docker template is included at [`unraid/debridup.xml`](unraid/debridup.xml). It defaults to the public GHCR image, stores SQLite data in appdata, runs as Unraid's `nobody:users` (`PUID=99`, `PGID=100`), and uses a read-only root filesystem.
+
+Use the [Unraid guide](unraid/README.md) for the short key-generation and template-import steps. Keep a separate protected backup of the encryption key: restoring a database requires its matching key.
+
 ## Security model
 
 - API keys and notification endpoints are encrypted with XChaCha20-Poly1305 before reaching SQLite.
@@ -46,3 +52,4 @@ To build directly from source instead, run `docker build -t debridup:local .`.
 | `DEBRIDUP_ENCRYPTION_KEY` | Alternative master-key source for non-Docker development. |
 | `DEBRIDUP_DATA_DIR` | Defaults to `./data`. |
 | `DEBRIDUP_ADDR` | Defaults to `:8080`. |
+| `PUID` / `PGID` | Optional runtime user and group IDs for bind-mounted data; Unraid template defaults to `99` / `100`. |

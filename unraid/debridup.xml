@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>debridup</Name>
+  <Repository>ghcr.io/thetoadsage/debridup:latest</Repository>
+  <Registry>https://ghcr.io/thetoadsage/debridup</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/thetoadsage/debridup/issues</Support>
+  <Project>https://github.com/thetoadsage/debridup</Project>
+  <GitHub>https://github.com/thetoadsage/debridup</GitHub>
+  <TemplateURL>https://raw.githubusercontent.com/thetoadsage/debridup/main/unraid/debridup.xml</TemplateURL>
+  <ReadMe>https://raw.githubusercontent.com/thetoadsage/debridup/main/unraid/README.md</ReadMe>
+  <Overview>Private, self-hosted uptime monitoring for debrid providers.&#xD;
+&#xD;
+Before applying this template, create the encryption-key file using the command in the linked Unraid guide. Keep the Data path on a pool device (normally /mnt/cache) because DebridUp uses SQLite. If your pool is not named cache, change both host paths to match it.</Overview>
+  <Category>Tools:Utilities Status:Monitoring</Category>
+  <ExtraSearchTerms>debrid uptime monitoring torbox premiumize real debrid alldebrid status</ExtraSearchTerms>
+  <Requires>An encryption-key file created before the first start. AMD64 or ARM64 Unraid host.</Requires>
+  <License>AGPL-3.0</License>
+  <WebUI>http://[IP]:[PORT:8080]</WebUI>
+  <ExtraParams>--read-only --tmpfs /tmp</ExtraParams>
+  <Config Name="Appdata" Target="/data" Default="/mnt/cache/appdata/debridup" Mode="rw" Description="SQLite database and application data. Keep this on a pool device rather than /mnt/user for reliable SQLite performance. If your pool is not named cache, change this path." Type="Path" Display="always" Required="true" Mask="false">/mnt/cache/appdata/debridup</Config>
+  <Config Name="Encryption key file" Target="/run/secrets/encryption_key" Default="/mnt/cache/appdata/debridup/encryption_key" Mode="ro" Description="A base64-encoded 32-byte key. Create this file before starting with the command in the linked Unraid guide. This path must match your selected appdata pool." Type="Path" Display="always" Required="true" Mask="false">/mnt/cache/appdata/debridup/encryption_key</Config>
+  <Config Name="WebUI port" Target="8080" Default="8080" Mode="tcp" Description="Port used to open the DebridUp dashboard." Type="Port" Display="always" Required="true" Mask="false">8080</Config>
+  <Config Name="Admin password" Target="DEBRIDUP_ADMIN_PASSWORD" Default="" Mode="" Description="Required on first start. This becomes the single administrator password." Type="Variable" Display="always" Required="true" Mask="true"></Config>
+  <Config Name="Encryption key file in container" Target="DEBRIDUP_ENCRYPTION_KEY_FILE" Default="/run/secrets/encryption_key" Mode="" Description="Internal path for the encryption key. Leave unchanged." Type="Variable" Display="hidden" Required="true" Mask="false">/run/secrets/encryption_key</Config>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User ID DebridUp runs as. 99 is Unraid's nobody user, which normally owns appdata." Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group ID DebridUp runs as. 100 is Unraid's users group." Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
+</Container>
