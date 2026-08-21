@@ -245,6 +245,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /api/incidents", a.auth(a.listIncidents))
 	mux.HandleFunc("GET /api/notifications/ntfy", a.auth(a.getNtfy))
 	mux.HandleFunc("PUT /api/notifications/ntfy", a.auth(a.putNtfy))
+	mux.HandleFunc("POST /api/notifications/ntfy/test", a.auth(a.testNtfy))
 	static, _ := fs.Sub(webFS, "web")
 	files := http.FileServer(http.FS(static))
 	mux.Handle("GET /login.html", files)
@@ -1008,6 +1009,30 @@ func (a *app) putNtfy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]bool{"configured": true, "enabled": in.Enabled})
 }
 
+func (a *app) testNtfy(w http.ResponseWriter, r *http.Request) {
+	var nonce, cipher []byte
+	err := a.db.QueryRow(`SELECT nonce,ciphertext FROM notification_channels WHERE kind='ntfy' LIMIT 1`).Scan(&nonce, &cipher)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeJSON(w, 400, map[string]string{"error": "configure an ntfy topic first"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not load notification configuration"})
+		return
+	}
+	plain, err := a.decrypt(nonce, cipher, "channel:ntfy")
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not decrypt notification configuration"})
+		return
+	}
+	err = a.sendNtfy(string(plain), "DebridUp test notification", "Your ntfy notification channel is configured correctly.", "white_check_mark", "test-"+strconv.FormatInt(time.Now().Unix(), 10))
+	if err != nil {
+		writeJSON(w, 502, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
 func (a *app) enqueueNotification(incidentID int64, eventType, name, previous, next string, at time.Time) {
 	rows, err := a.db.Query(`SELECT id FROM notification_channels WHERE kind='ntfy' AND enabled=1`)
 	if err != nil {
@@ -1070,25 +1095,10 @@ func (a *app) deliverNtfy(j struct {
 		var payload map[string]string
 		err = json.Unmarshal([]byte(j.payload), &payload)
 		if err == nil {
-			req, requestErr := http.NewRequest(http.MethodPost, string(plain), bytes.NewBufferString(payload["message"]))
-			if requestErr != nil {
-				err = requestErr
-			} else {
-				req.Header.Set("Title", payload["title"])
-				req.Header.Set("Tags", "warning")
-				req.Header.Set("X-Event-ID", strconv.FormatInt(j.id, 10))
-				resp, requestErr := a.client.Do(req)
-				if requestErr != nil {
-					err = requestErr
-				} else {
-					_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-					resp.Body.Close()
-					if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-						_, _ = a.db.Exec(`UPDATE notification_outbox SET status='delivered',attempts=attempts+1,delivered_at=?,last_error=NULL WHERE id=?`, time.Now().Unix(), j.id)
-						return
-					}
-					err = fmt.Errorf("ntfy returned HTTP %d", resp.StatusCode)
-				}
+			err = a.sendNtfy(string(plain), payload["title"], payload["message"], "warning", strconv.FormatInt(j.id, 10))
+			if err == nil {
+				_, _ = a.db.Exec(`UPDATE notification_outbox SET status='delivered',attempts=attempts+1,delivered_at=?,last_error=NULL WHERE id=?`, time.Now().Unix(), j.id)
+				return
 			}
 		}
 	}
@@ -1101,6 +1111,26 @@ func (a *app) deliverNtfy(j struct {
 		delay = time.Hour
 	}
 	_, _ = a.db.Exec(`UPDATE notification_outbox SET status='retry',attempts=?,next_attempt_at=?,last_error=? WHERE id=?`, attempt, time.Now().Add(delay).Unix(), safeErr(err), j.id)
+}
+
+func (a *app) sendNtfy(url, title, message, tags, eventID string) error {
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBufferString(message))
+	if err != nil {
+		return errors.New("configured ntfy URL is invalid")
+	}
+	req.Header.Set("Title", title)
+	req.Header.Set("Tags", tags)
+	req.Header.Set("X-Event-ID", eventID)
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return errors.New("could not reach the ntfy server")
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("ntfy returned HTTP %d", resp.StatusCode)
+	}
+	return nil
 }
 func min(a, b int) int {
 	if a < b {

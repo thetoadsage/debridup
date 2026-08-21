@@ -4,6 +4,26 @@ const date = value => value ? new Date(value * 1000).toLocaleString() : 'No chec
 const state = value => (value || 'checking').replaceAll('_', ' ');
 let ntfyConfigured = false;
 
+function renderNtfy(config) {
+  ntfyConfigured = Boolean(config.configured);
+  const enabled = ntfyConfigured && Boolean(config.enabled);
+  const badge = $('#ntfy-badge');
+  badge.className = `channel-badge ${!ntfyConfigured ? 'unconfigured' : enabled ? 'enabled' : 'disabled'}`;
+  badge.textContent = !ntfyConfigured ? 'Not configured' : enabled ? 'Enabled' : 'Configured · Disabled';
+  $('#ntfy-detail').textContent = !ntfyConfigured ? 'Add a topic URL to configure this channel.' : enabled ? 'A topic URL is stored securely and notifications are active.' : 'A topic URL is stored securely, but notifications are paused.';
+  $('#ntfy-url-label').textContent = ntfyConfigured ? 'Replace topic URL' : 'Topic URL';
+  $('#ntfy-url').placeholder = ntfyConfigured ? 'Enter a new URL only to replace the stored one' : 'https://ntfy.sh/your-private-topic';
+  $('#ntfy-url-help').textContent = ntfyConfigured ? 'The existing URL is stored securely and hidden. Leave this blank to keep it.' : 'The URL is encrypted and will not be shown again.';
+  $('#ntfy-enabled').checked = enabled;
+  $('#ntfy-test').disabled = !ntfyConfigured;
+}
+
+function notificationMessage(message, type = '') {
+  const output = $('#ntfy-message');
+  output.className = `channel-message ${type}`;
+  output.textContent = message;
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {...options, headers:{'Content-Type':'application/json', ...(options.headers || {})}});
   if (response.status === 401) { location.assign('/login.html'); throw new Error('unauthorized'); }
@@ -31,7 +51,7 @@ function renderIncidents(items) {
   $('#incidents').innerHTML = items.length ? items.map(i => `<article class="incident"><p><strong>${escapeHTML(i.Name)}</strong> · <span class="state ${i.LatestState}">${state(i.LatestState)}</span></p><p class="muted">Started ${date(i.OpenedAt)}${i.ResolvedAt ? ` · Recovered ${date(i.ResolvedAt)}` : ' · Open'}</p></article>`).join('') : '<p class="muted">No incidents recorded.</p>';
 }
 function escapeHTML(text) { const e = document.createElement('span'); e.textContent = text || ''; return e.innerHTML; }
-async function refresh() { const [overview, incidents, ntfy] = await Promise.all([api('/api/overview'), api('/api/incidents'), api('/api/notifications/ntfy')]); const monitors = Array.isArray(overview.monitors) ? overview.monitors : []; const checks = await Promise.all(monitors.map(m => api(`/api/monitors/${m.id}/checks`).catch(() => []))); renderOverview({...overview, monitors}, Object.fromEntries(monitors.map((m, i) => [m.id, checks[i]]))); renderIncidents(incidents); ntfyConfigured = ntfy.configured; $('#ntfy-enabled').checked = ntfy.enabled; $('#ntfy-status').textContent = ntfy.configured ? 'A topic is configured. You can enable or disable it without entering the URL again.' : 'No ntfy topic configured.'; }
+async function refresh() { const [overview, incidents, ntfy] = await Promise.all([api('/api/overview'), api('/api/incidents'), api('/api/notifications/ntfy')]); const monitors = Array.isArray(overview.monitors) ? overview.monitors : []; const checks = await Promise.all(monitors.map(m => api(`/api/monitors/${m.id}/checks`).catch(() => []))); renderOverview({...overview, monitors}, Object.fromEntries(monitors.map((m, i) => [m.id, checks[i]]))); renderIncidents(incidents); renderNtfy(ntfy); }
 
 $('#refresh').addEventListener('click', () => refresh().catch(showError));
 $('#logout').addEventListener('click', async () => { await fetch('/logout',{method:'POST'}); location.assign('/login.html'); });
@@ -43,7 +63,8 @@ $('#monitor-form').addEventListener('submit', async event => {
   const payload = {provider:$('#provider').value,name:$('#name').value,apiKey:$('#api-key').value,intervalSeconds:+$('#interval').value,timeoutSeconds:+$('#timeout').value,failureThreshold:+$('#failure').value,recoveryThreshold:+$('#recovery').value,publicCheck:$('#public-check').checked};
   try { await api('/api/monitors',{method:'POST',body:JSON.stringify(payload)}); $('#monitor-dialog').close(); event.target.reset(); await refresh(); } catch (error) { $('#monitor-error').textContent = error.message; }
 });
-$('#ntfy-form').addEventListener('submit', async event => { event.preventDefault(); const url=$('#ntfy-url').value.trim(); if (!url && !ntfyConfigured) { $('#ntfy-status').textContent = 'Enter the complete ntfy topic URL first.'; return; } try { const result = await api('/api/notifications/ntfy',{method:'PUT',body:JSON.stringify({url,enabled:$('#ntfy-enabled').checked})}); ntfyConfigured = result.configured; $('#ntfy-url').value=''; $('#ntfy-status').textContent=result.enabled ? 'ntfy notifications enabled.' : 'ntfy notifications disabled.'; } catch(error) { $('#ntfy-status').textContent=error.message; } });
+$('#ntfy-form').addEventListener('submit', async event => { event.preventDefault(); const url=$('#ntfy-url').value.trim(); if (!url && !ntfyConfigured) { notificationMessage('Enter the complete ntfy topic URL first.', 'error'); return; } try { notificationMessage('Saving…'); const result = await api('/api/notifications/ntfy',{method:'PUT',body:JSON.stringify({url,enabled:$('#ntfy-enabled').checked})}); $('#ntfy-url').value=''; renderNtfy(result); notificationMessage(result.enabled ? 'Settings saved. Incident notifications are enabled.' : 'Settings saved. The channel is configured but disabled.', 'success'); } catch(error) { notificationMessage(error.message, 'error'); } });
+$('#ntfy-test').addEventListener('click', async () => { const button = $('#ntfy-test'); button.disabled = true; notificationMessage('Sending test notification…'); try { await api('/api/notifications/ntfy/test', {method:'POST'}); notificationMessage('Test notification delivered successfully.', 'success'); } catch(error) { notificationMessage(`Test failed: ${error.message}`, 'error'); } finally { button.disabled = !ntfyConfigured; } });
 function showError(error) { console.error(error); $('#updated').textContent = `Unable to refresh dashboard: ${error.message || 'unknown error'}`; }
 refresh().catch(showError);
 setInterval(() => refresh().catch(showError), 30_000);
