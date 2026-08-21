@@ -13,6 +13,7 @@ async function api(path, options = {}) {
 }
 
 function chart(checks) {
+	checks = Array.isArray(checks) ? checks : [];
   const points = checks.filter(c => c.Source === 'authenticated').slice(0, 120).reverse();
   if (points.length < 2) return '<p class="muted graph-empty">Response-time graph appears after two checks.</p>';
   const max = Math.max(1, ...points.map(c => c.DurationMS));
@@ -26,10 +27,11 @@ function renderOverview(data, checksByID = {}) {
   $('#comparison').innerHTML = data.monitors.length ? data.monitors.map(m => `<div class="bar-row"><span>${escapeHTML(m.Name)}</span><div class="bar"><i style="width:${Math.max(0,Math.min(100,m.availability || 0))}%"></i></div><strong>${fmt(m.availability)}</strong></div>`).join('') : '<p class="muted">Availability appears after authenticated checks run.</p>';
 }
 function renderIncidents(items) {
+	items = Array.isArray(items) ? items : [];
   $('#incidents').innerHTML = items.length ? items.map(i => `<article class="incident"><p><strong>${escapeHTML(i.Name)}</strong> · <span class="state ${i.LatestState}">${state(i.LatestState)}</span></p><p class="muted">Started ${date(i.OpenedAt)}${i.ResolvedAt ? ` · Recovered ${date(i.ResolvedAt)}` : ' · Open'}</p></article>`).join('') : '<p class="muted">No incidents recorded.</p>';
 }
 function escapeHTML(text) { const e = document.createElement('span'); e.textContent = text || ''; return e.innerHTML; }
-async function refresh() { const [overview, incidents, ntfy] = await Promise.all([api('/api/overview'), api('/api/incidents'), api('/api/notifications/ntfy')]); const checks = await Promise.all(overview.monitors.map(m => api(`/api/monitors/${m.id}/checks`))); renderOverview(overview, Object.fromEntries(overview.monitors.map((m, i) => [m.id, checks[i]]))); renderIncidents(incidents); ntfyConfigured = ntfy.configured; $('#ntfy-enabled').checked = ntfy.enabled; $('#ntfy-status').textContent = ntfy.configured ? 'A topic is configured. You can enable or disable it without entering the URL again.' : 'No ntfy topic configured.'; }
+async function refresh() { const [overview, incidents, ntfy] = await Promise.all([api('/api/overview'), api('/api/incidents'), api('/api/notifications/ntfy')]); const monitors = Array.isArray(overview.monitors) ? overview.monitors : []; const checks = await Promise.all(monitors.map(m => api(`/api/monitors/${m.id}/checks`).catch(() => []))); renderOverview({...overview, monitors}, Object.fromEntries(monitors.map((m, i) => [m.id, checks[i]]))); renderIncidents(incidents); ntfyConfigured = ntfy.configured; $('#ntfy-enabled').checked = ntfy.enabled; $('#ntfy-status').textContent = ntfy.configured ? 'A topic is configured. You can enable or disable it without entering the URL again.' : 'No ntfy topic configured.'; }
 
 $('#refresh').addEventListener('click', () => refresh().catch(showError));
 $('#logout').addEventListener('click', async () => { await fetch('/logout',{method:'POST'}); location.assign('/login.html'); });
@@ -42,6 +44,6 @@ $('#monitor-form').addEventListener('submit', async event => {
   try { await api('/api/monitors',{method:'POST',body:JSON.stringify(payload)}); $('#monitor-dialog').close(); event.target.reset(); await refresh(); } catch (error) { $('#monitor-error').textContent = error.message; }
 });
 $('#ntfy-form').addEventListener('submit', async event => { event.preventDefault(); const url=$('#ntfy-url').value.trim(); if (!url && !ntfyConfigured) { $('#ntfy-status').textContent = 'Enter the complete ntfy topic URL first.'; return; } try { const result = await api('/api/notifications/ntfy',{method:'PUT',body:JSON.stringify({url,enabled:$('#ntfy-enabled').checked})}); ntfyConfigured = result.configured; $('#ntfy-url').value=''; $('#ntfy-status').textContent=result.enabled ? 'ntfy notifications enabled.' : 'ntfy notifications disabled.'; } catch(error) { $('#ntfy-status').textContent=error.message; } });
-function showError(error) { console.error(error); $('#updated').textContent = 'Unable to refresh dashboard.'; }
+function showError(error) { console.error(error); $('#updated').textContent = `Unable to refresh dashboard: ${error.message || 'unknown error'}`; }
 refresh().catch(showError);
 setInterval(() => refresh().catch(showError), 30_000);

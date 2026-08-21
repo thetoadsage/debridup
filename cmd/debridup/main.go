@@ -836,7 +836,7 @@ func (a *app) listChecks(w http.ResponseWriter, r *http.Request) {
 		ErrorDetail   *string `json:"errorDetail"`
 		CheckedAt     int64   `json:"checkedAt"`
 	}
-	var out []row
+	out := make([]row, 0)
 	for rows.Next() {
 		var x row
 		var httpStatus sql.NullInt64
@@ -933,7 +933,7 @@ func (a *app) listIncidents(w http.ResponseWriter, r *http.Request) {
 		ResolvedAt                *int64 `json:"resolvedAt"`
 		InitialState, LatestState string
 	}
-	var out []incident
+	out := make([]incident, 0)
 	for rows.Next() {
 		var x incident
 		var resolved sql.NullInt64
