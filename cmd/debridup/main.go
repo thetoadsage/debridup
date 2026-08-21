@@ -71,6 +71,11 @@ type checkResult struct {
 	CheckedAt   time.Time
 }
 
+type incidentPeriod struct {
+	OpenedAt   int64
+	ResolvedAt int64
+}
+
 type providerDefinition struct {
 	Endpoint       string
 	PublicEndpoint string
@@ -1203,7 +1208,8 @@ func (a *app) overview(w http.ResponseWriter, r *http.Request) {
 		OpenIncident          bool     `json:"openIncident"`
 	}
 	out := make([]item, 0, len(ms))
-	cutoff := time.Now().Add(-30 * 24 * time.Hour).Unix()
+	now := time.Now().Unix()
+	cutoff := now - int64(30*24*time.Hour/time.Second)
 	for _, m := range ms {
 		v := item{ID: m.ID, Name: m.Name, Provider: m.Provider, State: "checking"}
 		var last sql.NullInt64
@@ -1212,12 +1218,37 @@ func (a *app) overview(w http.ResponseWriter, r *http.Request) {
 			x := last.Int64
 			v.LastCheck = &x
 		}
-		var total, eligible, good int
-		_ = a.db.QueryRow(`SELECT COUNT(*),SUM(CASE WHEN state!='auth_failed' THEN 1 ELSE 0 END),SUM(CASE WHEN state='healthy' THEN 1 ELSE 0 END) FROM check_results WHERE monitor_id=? AND source='authenticated' AND checked_at>=?`, m.ID, cutoff).Scan(&total, &eligible, &good)
-		if eligible > 0 {
-			x := float64(good) / float64(eligible) * 100
-			v.Availability = &x
+		var firstCheck sql.NullInt64
+		_ = a.db.QueryRow(`SELECT MIN(checked_at) FROM check_results WHERE monitor_id=? AND source='authenticated'`, m.ID).Scan(&firstCheck)
+		if firstCheck.Valid {
+			observedStart := max(firstCheck.Int64, cutoff)
+			incidentRows, queryErr := a.db.Query(`SELECT opened_at,resolved_at FROM incidents WHERE monitor_id=? AND opened_at<? AND (resolved_at IS NULL OR resolved_at>?) ORDER BY opened_at`, m.ID, now, observedStart)
+			var periods []incidentPeriod
+			if queryErr == nil {
+				periodsValid := true
+				for incidentRows.Next() {
+					var period incidentPeriod
+					var resolved sql.NullInt64
+					if incidentRows.Scan(&period.OpenedAt, &resolved) != nil {
+						periodsValid = false
+						break
+					}
+					if resolved.Valid {
+						period.ResolvedAt = resolved.Int64
+					}
+					periods = append(periods, period)
+				}
+				if incidentRows.Err() != nil {
+					periodsValid = false
+				}
+				incidentRows.Close()
+				if periodsValid {
+					v.Availability = confirmedAvailability(observedStart, now, periods)
+				}
+			}
 		}
+		var total, eligible int
+		_ = a.db.QueryRow(`SELECT COUNT(*),COUNT(CASE WHEN state!='auth_failed' THEN 1 END) FROM check_results WHERE monitor_id=? AND source='authenticated' AND checked_at>=?`, m.ID, cutoff).Scan(&total, &eligible)
 		if total > 0 {
 			x := float64(eligible) / float64(total) * 100
 			v.Coverage = &x
@@ -1243,8 +1274,36 @@ func (a *app) overview(w http.ResponseWriter, r *http.Request) {
 		v.OpenIncident = count > 0
 		out = append(out, v)
 	}
-	writeJSON(w, 200, map[string]any{"monitors": out, "generatedAt": time.Now().Unix()})
+	writeJSON(w, 200, map[string]any{"monitors": out, "generatedAt": now})
 }
+
+func confirmedAvailability(observedStart, now int64, periods []incidentPeriod) *float64 {
+	if observedStart <= 0 || observedStart > now {
+		return nil
+	}
+	if observedStart == now {
+		value := 100.0
+		return &value
+	}
+	observedSeconds := now - observedStart
+	var downtimeSeconds int64
+	for _, period := range periods {
+		start := max(period.OpenedAt, observedStart)
+		end := period.ResolvedAt
+		if end == 0 || end > now {
+			end = now
+		}
+		if end > start {
+			downtimeSeconds += end - start
+		}
+	}
+	if downtimeSeconds > observedSeconds {
+		downtimeSeconds = observedSeconds
+	}
+	value := float64(observedSeconds-downtimeSeconds) / float64(observedSeconds) * 100
+	return &value
+}
+
 func (a *app) listIncidents(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.Query(`SELECT i.id,m.name,m.provider,i.opened_at,i.detected_at,i.resolved_at,i.initial_state,i.latest_state,i.summary FROM incidents i JOIN monitors m ON m.id=i.monitor_id ORDER BY i.opened_at DESC LIMIT 200`)
 	if err != nil {

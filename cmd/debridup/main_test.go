@@ -78,6 +78,38 @@ func TestIncidentSummary(t *testing.T) {
 	}
 }
 
+func TestConfirmedAvailability(t *testing.T) {
+	tests := []struct {
+		name    string
+		start   int64
+		now     int64
+		periods []incidentPeriod
+		want    *float64
+	}{
+		{name: "no monitoring history", start: 0, now: 1100},
+		{name: "isolated failures do not count", start: 100, now: 1100, want: floatPointer(100)},
+		{name: "confirmed resolved incident", start: 100, now: 1100, periods: []incidentPeriod{{OpenedAt: 200, ResolvedAt: 300}}, want: floatPointer(90)},
+		{name: "incident is clipped to window", start: 100, now: 1100, periods: []incidentPeriod{{OpenedAt: 50, ResolvedAt: 200}}, want: floatPointer(90)},
+		{name: "open incident runs to now", start: 100, now: 1100, periods: []incidentPeriod{{OpenedAt: 900}}, want: floatPointer(80)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := confirmedAvailability(test.start, test.now, test.periods)
+			if test.want == nil {
+				if got != nil {
+					t.Fatalf("confirmedAvailability() = %.2f, want nil", *got)
+				}
+				return
+			}
+			if got == nil || *got != *test.want {
+				t.Fatalf("confirmedAvailability() = %v, want %.2f", got, *test.want)
+			}
+		})
+	}
+}
+
+func floatPointer(value float64) *float64 { return &value }
+
 func TestProviderDefinitions(t *testing.T) {
 	want := []string{"torbox", "premiumize", "alldebrid", "realdebrid", "torrin", "pikpak", "offcloud", "debridlink", "easydebrid", "debrider", "deepbrid"}
 	for _, id := range want {
