@@ -114,14 +114,14 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	db, err := sql.Open("sqlite", filepath.Join(dataDir, "debridup.db"))
+	db, err := openDatabase(filepath.Join(dataDir, "debridup.db"))
 	if err != nil {
 		panic(err)
 	}
 	defer db.Close()
 	cookieHash := sha256.Sum256(key)
 	a := &app{db: db, key: key, cookieKey: cookieHash[:], client: &http.Client{Timeout: 65 * time.Second}, logger: slog.Default(), lastRuns: map[int64]time.Time{}}
-	if err := a.migrate(); err != nil {
+	if err := migrateDatabase(context.Background(), db); err != nil {
 		panic(err)
 	}
 	if err := a.ensureAdmin(os.Getenv("DEBRIDUP_ADMIN_PASSWORD")); err != nil {
@@ -158,91 +158,6 @@ func loadKey() ([]byte, error) {
 		return nil, errors.New("DEBRIDUP_ENCRYPTION_KEY(_FILE) must be base64 for exactly 32 bytes")
 	}
 	return b, nil
-}
-
-func (a *app) migrate() error {
-	_, err := a.db.Exec(`
-PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
-PRAGMA busy_timeout = 5000;
-CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS monitors (
- id INTEGER PRIMARY KEY, provider TEXT NOT NULL CHECK(provider IN ('torbox','premiumize','alldebrid','realdebrid','torrin','pikpak','offcloud','debridlink','easydebrid','debrider','deepbrid')), name TEXT NOT NULL,
- enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 60, timeout_seconds INTEGER NOT NULL DEFAULT 15,
- failure_threshold INTEGER NOT NULL DEFAULT 3, recovery_threshold INTEGER NOT NULL DEFAULT 2, public_check INTEGER NOT NULL DEFAULT 0,
- created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS monitor_secrets (monitor_id INTEGER PRIMARY KEY REFERENCES monitors(id) ON DELETE CASCADE, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL, key_version INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS monitor_states (
- monitor_id INTEGER PRIMARY KEY REFERENCES monitors(id) ON DELETE CASCADE, current_state TEXT NOT NULL DEFAULT 'healthy', state_since INTEGER NOT NULL,
- last_raw_state TEXT NOT NULL DEFAULT 'healthy', failure_streak INTEGER NOT NULL DEFAULT 0, recovery_streak INTEGER NOT NULL DEFAULT 0,
- failure_started_at INTEGER NOT NULL DEFAULT 0, last_check_at INTEGER
-);
-CREATE TABLE IF NOT EXISTS check_results (
- id INTEGER PRIMARY KEY, monitor_id INTEGER NOT NULL REFERENCES monitors(id) ON DELETE CASCADE, source TEXT NOT NULL CHECK(source IN ('authenticated','public')),
- state TEXT NOT NULL, duration_ms INTEGER NOT NULL, http_status INTEGER, error_code TEXT, error_detail TEXT, checked_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS check_results_monitor_time ON check_results(monitor_id, checked_at DESC);
-CREATE TABLE IF NOT EXISTS incidents (
- id INTEGER PRIMARY KEY, monitor_id INTEGER NOT NULL REFERENCES monitors(id) ON DELETE CASCADE, opened_at INTEGER NOT NULL, detected_at INTEGER NOT NULL,
- resolved_at INTEGER, initial_state TEXT NOT NULL, latest_state TEXT NOT NULL, summary TEXT
-);
-CREATE INDEX IF NOT EXISTS incidents_monitor_time ON incidents(monitor_id, opened_at DESC);
-CREATE TABLE IF NOT EXISTS incident_events (
- id INTEGER PRIMARY KEY, incident_id INTEGER NOT NULL REFERENCES incidents(id) ON DELETE CASCADE, type TEXT NOT NULL,
- previous_state TEXT, new_state TEXT NOT NULL, created_at INTEGER NOT NULL, check_id INTEGER REFERENCES check_results(id)
-);
-CREATE TABLE IF NOT EXISTS notification_channels (
- id INTEGER PRIMARY KEY, kind TEXT NOT NULL UNIQUE CHECK(kind='ntfy'), enabled INTEGER NOT NULL DEFAULT 0, nonce BLOB, ciphertext BLOB, updated_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS notification_outbox (
- id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE, incident_id INTEGER REFERENCES incidents(id) ON DELETE CASCADE,
- event_type TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL, delivered_at INTEGER, last_error TEXT
-);
-CREATE INDEX IF NOT EXISTS outbox_pending ON notification_outbox(status, next_attempt_at);
-`)
-	if err != nil {
-		return err
-	}
-	return a.migrateProviderConstraint()
-}
-
-func (a *app) migrateProviderConstraint() error {
-	var schema string
-	if err := a.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='monitors'`).Scan(&schema); err != nil {
-		return err
-	}
-	if strings.Contains(schema, "'deepbrid'") {
-		return nil
-	}
-	conn, err := a.db.Conn(context.Background())
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(context.Background(), `PRAGMA foreign_keys = OFF`); err != nil {
-		return err
-	}
-	defer conn.ExecContext(context.Background(), `PRAGMA foreign_keys = ON`)
-	tx, err := conn.BeginTx(context.Background(), nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err = tx.Exec(`
-CREATE TABLE monitors_new (
- id INTEGER PRIMARY KEY, provider TEXT NOT NULL CHECK(provider IN ('torbox','premiumize','alldebrid','realdebrid','torrin','pikpak','offcloud','debridlink','easydebrid','debrider','deepbrid')), name TEXT NOT NULL,
- enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 60, timeout_seconds INTEGER NOT NULL DEFAULT 15,
- failure_threshold INTEGER NOT NULL DEFAULT 3, recovery_threshold INTEGER NOT NULL DEFAULT 2, public_check INTEGER NOT NULL DEFAULT 0,
- created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-);
-INSERT INTO monitors_new SELECT * FROM monitors;
-DROP TABLE monitors;
-ALTER TABLE monitors_new RENAME TO monitors;
-`); err != nil {
-		return err
-	}
-	return tx.Commit()
 }
 
 func (a *app) ensureAdmin(password string) error {
@@ -303,6 +218,7 @@ func (a *app) decrypt(nonce, ciphertext []byte, aad string) ([]byte, error) {
 func (a *app) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]bool{"ok": true}) })
+	mux.HandleFunc("GET /readyz", a.readiness)
 	mux.HandleFunc("POST /login", a.login)
 	mux.HandleFunc("POST /logout", a.logout)
 	mux.HandleFunc("GET /api/overview", a.auth(a.overview))
@@ -325,6 +241,14 @@ func (a *app) routes() http.Handler {
 	mux.Handle("GET /app.css", files)
 	mux.Handle("/", a.auth(func(w http.ResponseWriter, r *http.Request) { files.ServeHTTP(w, r) }))
 	return securityHeaders(mux)
+}
+
+func (a *app) readiness(w http.ResponseWriter, r *http.Request) {
+	if err := databaseReady(r.Context(), a.db); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"code": "database_unavailable", "error": "database is not ready"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func securityHeaders(next http.Handler) http.Handler {

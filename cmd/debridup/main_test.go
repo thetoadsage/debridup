@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"io"
 	"net/http"
@@ -204,8 +205,7 @@ func TestMigrateExpandsProviderConstraint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &app{db: db}
-	if err = a.migrate(); err != nil {
+	if err = migrateDatabase(context.Background(), db); err != nil {
 		t.Fatalf("migrate failed: %v", err)
 	}
 	if _, err = db.Exec(`INSERT INTO monitors(provider,name,created_at,updated_at) VALUES('realdebrid','Real-Debrid',2,2)`); err != nil {
@@ -233,7 +233,7 @@ func TestResetHistoryScopesAndPreservesConfiguration(t *testing.T) {
 	db.SetMaxOpenConns(1)
 	defer db.Close()
 	a := &app{db: db}
-	if err = a.migrate(); err != nil {
+	if err = migrateDatabase(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}
 
