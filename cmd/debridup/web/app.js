@@ -6,6 +6,19 @@ let ntfyConfigured = false;
 let editingMonitorID = null;
 let monitorConfigs = new Map();
 let refreshSequence = 0;
+const providerDetails = {
+  torbox: {name: 'TorBox', credential: 'API key'},
+  premiumize: {name: 'Premiumize', credential: 'API key'},
+  alldebrid: {name: 'AllDebrid', credential: 'API key'},
+  realdebrid: {name: 'Real-Debrid', credential: 'API token'},
+  torrin: {name: 'Torrin', credential: 'API key'},
+  pikpak: {name: 'PikPak', credential: 'Access token', help: 'Use an access token accepted by the PikPak user API. Replace it when it expires.'},
+  offcloud: {name: 'Offcloud', credential: 'API key'},
+  debridlink: {name: 'Debrid-Link', credential: 'API key'},
+  easydebrid: {name: 'EasyDebrid', credential: 'API key'},
+  debrider: {name: 'Debrider', credential: 'API key'},
+  deepbrid: {name: 'Deepbrid', credential: 'API key'},
+};
 
 function renderNtfy(config) {
   ntfyConfigured = Boolean(config.configured);
@@ -78,7 +91,7 @@ function chart(checks, monitorID) {
 }
 function renderOverview(data, checksByID = {}, configsByID = new Map()) {
   $('#updated').textContent = `Updated ${date(data.generatedAt)}`;
-  $('#cards').innerHTML = data.monitors.length ? data.monitors.map(m => `<article class="card"><div class="section-title"><div><p class="provider-name">${escapeHTML(m.Name)}</p><span class="provider">${escapeHTML(m.Provider)}</span></div><div class="card-status"><span class="state ${m.State}">${state(m.State)}</span><button type="button" class="quiet edit-monitor" data-monitor-id="${m.id}">Edit settings</button></div></div><div class="metric-grid"><div class="metric"><strong>${fmt(m.availability)}</strong><span>Availability</span></div><div class="metric"><strong>${fmt(m.coverage)}</strong><span>Coverage</span></div><div class="metric"><strong>${m.p95Ms == null ? '—' : `${m.p95Ms} ms`}</strong><span>p95 response time</span></div><div class="metric"><strong>${date(m.lastCheck)}</strong><span>Last authenticated check</span></div></div>${chart(checksByID[m.id] || [], m.id)}</article>`).join('') : '<article class="panel">No providers configured. Add TorBox or Premiumize to begin monitoring.</article>';
+  $('#cards').innerHTML = data.monitors.length ? data.monitors.map(m => `<article class="card"><div class="section-title"><div><p class="provider-name">${escapeHTML(m.Name)}</p><span class="provider">${escapeHTML(providerDetails[m.Provider]?.name || m.Provider)}</span></div><div class="card-status"><span class="state ${m.State}">${state(m.State)}</span><button type="button" class="quiet edit-monitor" data-monitor-id="${m.id}">Edit settings</button></div></div><div class="metric-grid"><div class="metric"><strong>${fmt(m.availability)}</strong><span>Availability</span></div><div class="metric"><strong>${fmt(m.coverage)}</strong><span>Coverage</span></div><div class="metric"><strong>${m.p95Ms == null ? '—' : `${m.p95Ms} ms`}</strong><span>p95 response time</span></div><div class="metric"><strong>${date(m.lastCheck)}</strong><span>Last authenticated check</span></div></div>${chart(checksByID[m.id] || [], m.id)}</article>`).join('') : '<article class="panel">No providers configured. Add a provider to begin monitoring.</article>';
   $('#comparison').innerHTML = data.monitors.length ? data.monitors.map(m => `<div class="bar-row"><span>${escapeHTML(m.Name)}</span><div class="bar"><i style="width:${Math.max(0,Math.min(100,m.availability || 0))}%"></i></div><strong>${fmt(m.availability)}</strong></div>`).join('') : '<p class="muted">Availability appears after authenticated checks run.</p>';
   document.querySelectorAll('.edit-monitor').forEach(button => button.addEventListener('click', () => openEditMonitor(configsByID.get(Number(button.dataset.monitorId)))));
 }
@@ -95,14 +108,20 @@ function resetMonitorDialog() {
   $('#monitor-form').reset();
   $('#provider').disabled = false;
   $('#api-key').required = true;
-  $('#api-key-label').textContent = 'API key';
-  $('#api-key-help').textContent = 'Required when adding a provider.';
+  setCredentialCopy($('#provider').value, false);
   $('#monitor-enabled').checked = true;
   $('#monitor-dialog-eyebrow').textContent = 'NEW MONITOR';
   $('#monitor-dialog-title').textContent = 'Add provider';
   $('#monitor-submit').textContent = 'Add provider';
   $('#delete-monitor').hidden = true;
   $('#monitor-error').textContent = '';
+}
+
+function setCredentialCopy(provider, replacing) {
+  const details = providerDetails[provider] || {credential: 'API key'};
+  const sentenceCredential = details.credential === 'Access token' ? 'access token' : details.credential;
+  $('#api-key-label').textContent = replacing ? `Replace ${sentenceCredential}` : details.credential;
+  $('#api-key-help').textContent = replacing ? `The existing ${sentenceCredential} is stored securely. Leave this blank to keep it.` : (details.help || `Enter the ${sentenceCredential} issued by the provider.`);
 }
 
 function openCreateMonitor() {
@@ -124,8 +143,7 @@ function openEditMonitor(config) {
   $('#monitor-enabled').checked = config.enabled;
   $('#public-check').checked = config.publicCheck;
   $('#api-key').required = false;
-  $('#api-key-label').textContent = 'Replace API key';
-  $('#api-key-help').textContent = 'The existing key is stored securely. Leave this blank to keep it.';
+  setCredentialCopy(config.provider, true);
   $('#monitor-dialog-eyebrow').textContent = config.provider.toUpperCase();
   $('#monitor-dialog-title').textContent = 'Edit provider';
   $('#monitor-submit').textContent = 'Save changes';
@@ -137,7 +155,11 @@ $('#refresh').addEventListener('click', () => refresh().catch(showError));
 $('#logout').addEventListener('click', async () => { await fetch('/logout',{method:'POST'}); location.assign('/login.html'); });
 $('#add-monitor').addEventListener('click', openCreateMonitor);
 $('#close-dialog').addEventListener('click', () => { $('#monitor-dialog').close(); resetMonitorDialog(); });
-$('#provider').addEventListener('change', e => { $('#name').value = e.target.value === 'torbox' ? 'TorBox' : 'Premiumize'; });
+$('#provider').addEventListener('change', event => {
+  const details = providerDetails[event.target.value];
+  $('#name').value = details?.name || event.target.value;
+  setCredentialCopy(event.target.value, false);
+});
 $('#monitor-form').addEventListener('submit', async event => {
   event.preventDefault(); $('#monitor-error').textContent = '';
   const payload = {name:$('#name').value,apiKey:$('#api-key').value,intervalSeconds:+$('#interval').value,timeoutSeconds:+$('#timeout').value,failureThreshold:+$('#failure').value,recoveryThreshold:+$('#recovery').value,publicCheck:$('#public-check').checked};

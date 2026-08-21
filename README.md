@@ -1,6 +1,8 @@
 # DebridUp
 
-Private, self-hosted uptime monitoring for debrid providers. The first release monitors TorBox and Premiumize with encrypted API keys, SQLite history, incidents, a dashboard, and ntfy notifications.
+Private, self-hosted uptime monitoring for debrid providers. DebridUp monitors TorBox, Premiumize, AllDebrid, Real-Debrid, Torrin, PikPak, Offcloud, Debrid-Link, EasyDebrid, Debrider, and Deepbrid with encrypted credentials, SQLite history, incidents, a dashboard, and ntfy notifications.
+
+All authenticated checks are read-only account or history requests. Most providers accept their normal API key or token. PikPak currently requires an access token accepted by its user API; because that token can expire, replace it from the provider settings when authentication begins failing.
 
 ## Run with Docker
 

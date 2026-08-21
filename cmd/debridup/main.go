@@ -71,6 +71,26 @@ type checkResult struct {
 	CheckedAt   time.Time
 }
 
+type providerDefinition struct {
+	Endpoint       string
+	PublicEndpoint string
+	Method         string
+}
+
+var providerDefinitions = map[string]providerDefinition{
+	"torbox":     {Endpoint: "https://api.torbox.app/v1/api/user/me", PublicEndpoint: "https://status.torbox.app/", Method: http.MethodGet},
+	"premiumize": {Endpoint: "https://www.premiumize.me/api/account/info", PublicEndpoint: "https://premiumize.reamaze.com/status", Method: http.MethodGet},
+	"alldebrid":  {Endpoint: "https://api.alldebrid.com/v4/user", PublicEndpoint: "https://api.alldebrid.com/v4/ping", Method: http.MethodGet},
+	"realdebrid": {Endpoint: "https://api.real-debrid.com/rest/1.0/user", PublicEndpoint: "https://api.real-debrid.com/rest/1.0/time", Method: http.MethodGet},
+	"torrin":     {Endpoint: "https://torrin.app/api/jobs", PublicEndpoint: "https://torrin.app/api/sites", Method: http.MethodGet},
+	"pikpak":     {Endpoint: "https://user.mypikpak.com/v1/user/me", PublicEndpoint: "https://mypikpak.com/", Method: http.MethodGet},
+	"offcloud":   {Endpoint: "https://offcloud.com/api/account/info", PublicEndpoint: "https://offcloud.com/", Method: http.MethodGet},
+	"debridlink": {Endpoint: "https://debrid-link.com/api/v2/account/infos", PublicEndpoint: "https://www.debrid-link.com/webapp/status", Method: http.MethodGet},
+	"easydebrid": {Endpoint: "https://easydebrid.com/api/v1/user/details", PublicEndpoint: "https://easydebrid.com/", Method: http.MethodGet},
+	"debrider":   {Endpoint: "https://debrider.app/api/v1/tasks", PublicEndpoint: "https://stats.uptimerobot.com/shklobtEFJ/801337046", Method: http.MethodGet},
+	"deepbrid":   {Endpoint: "https://www.deepbrid.com/api/v1/user", PublicEndpoint: "https://www.deepbrid.com/api/v1/hosts", Method: http.MethodGet},
+}
+
 type monitorState struct {
 	Current          string
 	StateSince       int64
@@ -142,7 +162,7 @@ PRAGMA journal_mode = WAL;
 PRAGMA busy_timeout = 5000;
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS monitors (
- id INTEGER PRIMARY KEY, provider TEXT NOT NULL CHECK(provider IN ('torbox','premiumize')), name TEXT NOT NULL,
+ id INTEGER PRIMARY KEY, provider TEXT NOT NULL CHECK(provider IN ('torbox','premiumize','alldebrid','realdebrid','torrin','pikpak','offcloud','debridlink','easydebrid','debrider','deepbrid')), name TEXT NOT NULL,
  enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 60, timeout_seconds INTEGER NOT NULL DEFAULT 15,
  failure_threshold INTEGER NOT NULL DEFAULT 3, recovery_threshold INTEGER NOT NULL DEFAULT 2, public_check INTEGER NOT NULL DEFAULT 0,
  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
@@ -176,7 +196,48 @@ CREATE TABLE IF NOT EXISTS notification_outbox (
 );
 CREATE INDEX IF NOT EXISTS outbox_pending ON notification_outbox(status, next_attempt_at);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	return a.migrateProviderConstraint()
+}
+
+func (a *app) migrateProviderConstraint() error {
+	var schema string
+	if err := a.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='monitors'`).Scan(&schema); err != nil {
+		return err
+	}
+	if strings.Contains(schema, "'deepbrid'") {
+		return nil
+	}
+	conn, err := a.db.Conn(context.Background())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err = conn.ExecContext(context.Background(), `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer conn.ExecContext(context.Background(), `PRAGMA foreign_keys = ON`)
+	tx, err := conn.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`
+CREATE TABLE monitors_new (
+ id INTEGER PRIMARY KEY, provider TEXT NOT NULL CHECK(provider IN ('torbox','premiumize','alldebrid','realdebrid','torrin','pikpak','offcloud','debridlink','easydebrid','debrider','deepbrid')), name TEXT NOT NULL,
+ enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 60, timeout_seconds INTEGER NOT NULL DEFAULT 15,
+ failure_threshold INTEGER NOT NULL DEFAULT 3, recovery_threshold INTEGER NOT NULL DEFAULT 2, public_check INTEGER NOT NULL DEFAULT 0,
+ created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+INSERT INTO monitors_new SELECT * FROM monitors;
+DROP TABLE monitors;
+ALTER TABLE monitors_new RENAME TO monitors;
+`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (a *app) ensureAdmin(password string) error {
@@ -400,62 +461,43 @@ func (a *app) runMonitor(m monitor) {
 	}
 }
 
-func (a *app) authCheck(m monitor, apiKey string) checkResult {
+func (a *app) authCheck(m monitor, credential string) checkResult {
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.TimeoutSeconds)*time.Second)
 	defer cancel()
-	var endpoint string
-	switch m.Provider {
-	case "torbox":
-		endpoint = "https://api.torbox.app/v1/api/user/me"
-	case "premiumize":
-		endpoint = "https://www.premiumize.me/api/account/info"
-	default:
+	provider, ok := providerDefinitions[m.Provider]
+	if !ok {
 		return checkResult{State: stateAPI, ErrorCode: "unsupported_provider", CheckedAt: started}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, provider.Method, provider.Endpoint, nil)
 	if err != nil {
 		return checkResult{State: stateConnection, ErrorCode: "request_build", CheckedAt: started}
 	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Authorization", "Bearer "+credential)
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "DebridUp/1.0")
 	resp, err := a.client.Do(req)
 	duration := time.Since(started).Milliseconds()
 	if err != nil {
 		return checkResult{State: stateConnection, DurationMS: duration, ErrorCode: transportCode(err), ErrorDetail: "request could not be completed", CheckedAt: started}
 	}
 	defer resp.Body.Close()
+	if resp.Request != nil && (resp.Request.URL.Host != req.URL.Host || resp.Request.URL.Path != req.URL.Path) {
+		return checkResult{State: stateAuthFailed, DurationMS: duration, HTTPStatus: resp.StatusCode, ErrorCode: "authentication_redirect", CheckedAt: started}
+	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 128<<10))
 	if err != nil {
 		return checkResult{State: stateConnection, DurationMS: duration, HTTPStatus: resp.StatusCode, ErrorCode: "read_error", CheckedAt: started}
 	}
 	r := checkResult{DurationMS: duration, HTTPStatus: resp.StatusCode, CheckedAt: started}
-	if m.Provider == "torbox" {
-		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized {
-			r.State = stateAuthFailed
-			r.ErrorCode = "authentication_rejected"
-			return r
-		}
-		if resp.StatusCode >= 500 {
-			r.State = stateAPI
-			r.ErrorCode = "server_error"
-			return r
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			r.State = stateAPI
-			r.ErrorCode = "unexpected_status"
-			return r
-		}
-		var payload struct {
-			Success *bool  `json:"success"`
-			Detail  string `json:"detail"`
-		}
-		if json.Unmarshal(body, &payload) != nil || (payload.Success != nil && !*payload.Success) {
-			r.State = stateAPI
-			r.ErrorCode = "invalid_response"
-			return r
-		}
-		r.State = stateHealthy
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		r.State = stateAuthFailed
+		r.ErrorCode = "authentication_rejected"
+		return r
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		r.State = stateAPI
+		r.ErrorCode = "rate_limited"
 		return r
 	}
 	if resp.StatusCode >= 500 {
@@ -468,40 +510,76 @@ func (a *app) authCheck(m monitor, apiKey string) checkResult {
 		r.ErrorCode = "unexpected_status"
 		return r
 	}
-	var payload struct {
-		Status any    `json:"status"`
-		Code   string `json:"code"`
-	}
+	var payload any
 	if json.Unmarshal(body, &payload) != nil {
 		r.State = stateAPI
 		r.ErrorCode = "invalid_response"
 		return r
 	}
-	if s, ok := payload.Status.(string); ok && s == "success" {
+	stateValue, code := classifyProviderPayload(m.Provider, payload)
+	if stateValue == "" {
 		r.State = stateHealthy
 		return r
 	}
-	r.State = stateAPI
-	r.ErrorCode = "api_error"
-	if strings.Contains(strings.ToLower(payload.Code), "auth") || strings.Contains(strings.ToLower(payload.Code), "key") || strings.Contains(strings.ToLower(payload.Code), "token") {
-		r.State = stateAuthFailed
-		r.ErrorCode = "authentication_rejected"
-	}
+	r.State = stateValue
+	r.ErrorCode = code
 	return r
+}
+
+func classifyProviderPayload(provider string, payload any) (string, string) {
+	object, isObject := payload.(map[string]any)
+	if !isObject {
+		return "", ""
+	}
+	switch provider {
+	case "torbox":
+		if success, present := object["success"].(bool); present && !success {
+			return classifyPayloadError(object)
+		}
+	case "premiumize", "alldebrid":
+		if status, present := object["status"].(string); present && !strings.EqualFold(status, "success") {
+			return classifyPayloadError(object)
+		}
+	case "debridlink":
+		if success, present := object["success"].(bool); present && !success {
+			return classifyPayloadError(object)
+		}
+	case "deepbrid":
+		if errorValue, present := object["error"].(float64); present && errorValue != 0 {
+			return classifyPayloadError(object)
+		}
+	case "offcloud":
+		if _, present := object["error"]; present {
+			return classifyPayloadError(object)
+		}
+	}
+	return "", ""
+}
+
+func classifyPayloadError(payload map[string]any) (string, string) {
+	encoded, _ := json.Marshal(payload)
+	message := strings.ToLower(string(encoded))
+	for _, marker := range []string{"auth", "apikey", "api key", "token", "credential", "unauthor", "logged in", "login"} {
+		if strings.Contains(message, marker) {
+			return stateAuthFailed, "authentication_rejected"
+		}
+	}
+	return stateAPI, "api_error"
 }
 
 func (a *app) publicCheck(m monitor) checkResult {
 	started := time.Now()
-	endpoint := "https://status.torbox.app/"
-	if m.Provider == "premiumize" {
-		endpoint = "https://premiumize.reamaze.com/status"
+	provider, ok := providerDefinitions[m.Provider]
+	if !ok || provider.PublicEndpoint == "" {
+		return checkResult{State: stateAPI, ErrorCode: "unsupported_provider", CheckedAt: started}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.TimeoutSeconds)*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, provider.PublicEndpoint, nil)
 	if err != nil {
 		return checkResult{State: stateConnection, ErrorCode: "request_build", CheckedAt: started}
 	}
+	req.Header.Set("User-Agent", "DebridUp/1.0")
 	resp, err := a.client.Do(req)
 	duration := time.Since(started).Milliseconds()
 	if err != nil {
@@ -659,7 +737,7 @@ func changeIncident(tx *sql.Tx, monitorID int64, previous, next, summary string,
 func incidentSummary(r checkResult) string {
 	switch r.State {
 	case stateAuthFailed:
-		return "The provider rejected the configured API key. Verify or replace the credential."
+		return "The provider rejected the configured credential. Verify or replace it."
 	case stateConnection:
 		if r.ErrorCode == "timeout" {
 			return "The authenticated API request timed out before the provider responded."
@@ -681,6 +759,8 @@ func incidentSummary(r checkResult) string {
 			return "The provider API was reachable, but its response was invalid or could not be understood."
 		case "api_error":
 			return "The provider API returned an application-level error."
+		case "rate_limited":
+			return "The provider API rate-limited the authenticated health check."
 		default:
 			return "The provider API was reachable but did not complete the health check successfully."
 		}
@@ -694,7 +774,7 @@ func incidentSummary(r checkResult) string {
 func incidentStateDescription(state string) string {
 	switch state {
 	case stateAuthFailed:
-		return "Authentication is failing. Verify or replace the configured API key."
+		return "Authentication is failing. Verify or replace the configured credential."
 	case stateConnection:
 		return "DebridUp could not connect to the provider API."
 	case stateAPI:
@@ -793,8 +873,8 @@ func (a *app) createMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.Provider = strings.ToLower(strings.TrimSpace(in.Provider))
-	if in.Provider != "torbox" && in.Provider != "premiumize" {
-		writeJSON(w, 400, map[string]string{"error": "provider must be torbox or premiumize"})
+	if _, supported := providerDefinitions[in.Provider]; !supported {
+		writeJSON(w, 400, map[string]string{"error": "unsupported provider"})
 		return
 	}
 	if len(strings.TrimSpace(in.Name)) < 1 || len(in.Name) > 80 || len(strings.TrimSpace(in.APIKey)) < 8 {
