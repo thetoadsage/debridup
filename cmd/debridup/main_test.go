@@ -31,6 +31,15 @@ func TestSendNtfy(t *testing.T) {
 	}
 }
 
+func TestHealthz(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	response := httptest.NewRecorder()
+	(&app{}).routes().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "{\"ok\":true}\n" {
+		t.Fatalf("health check returned %d: %q", response.Code, response.Body.String())
+	}
+}
+
 func TestSendNtfyReportsHTTPFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

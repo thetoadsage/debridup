@@ -8,4 +8,13 @@ if [ -n "${DEBRIDUP_ENCRYPTION_KEY_FILE:-}" ]; then
   unset DEBRIDUP_ENCRYPTION_KEY_FILE
 fi
 
-exec su-exec debridup /usr/local/bin/debridup
+run_uid="${PUID:-$(id -u debridup)}"
+run_gid="${PGID:-$(id -g debridup)}"
+case "$run_uid:$run_gid" in
+  *[!0-9:]*|:*)
+    echo "PUID and PGID must be numeric IDs" >&2
+    exit 64
+    ;;
+esac
+
+exec su-exec "$run_uid:$run_gid" /usr/local/bin/debridup
