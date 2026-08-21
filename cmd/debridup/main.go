@@ -248,6 +248,8 @@ func (a *app) routes() http.Handler {
 	static, _ := fs.Sub(webFS, "web")
 	files := http.FileServer(http.FS(static))
 	mux.Handle("GET /login.html", files)
+	mux.Handle("GET /login.js", files)
+	mux.Handle("GET /app.css", files)
 	mux.Handle("/", a.auth(func(w http.ResponseWriter, r *http.Request) { files.ServeHTTP(w, r) }))
 	return securityHeaders(mux)
 }
