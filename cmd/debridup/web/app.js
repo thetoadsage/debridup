@@ -35,18 +35,50 @@ async function api(path, options = {}) {
   return body;
 }
 
-function chart(checks) {
-	checks = Array.isArray(checks) ? checks : [];
+function smoothPath(points) {
+  return points.slice(1).reduce((path, point, index) => {
+    const previous = points[index];
+    const midpoint = (previous.x + point.x) / 2;
+    return `${path} C ${midpoint.toFixed(2)} ${previous.y.toFixed(2)}, ${midpoint.toFixed(2)} ${point.y.toFixed(2)}, ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
+  }, `M ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)}`);
+}
+
+function shortTime(value) {
+  return value ? new Date(value * 1000).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'}) : '';
+}
+
+function chart(checks, monitorID) {
+  checks = Array.isArray(checks) ? checks : [];
   const points = checks.filter(c => c.Source === 'authenticated').slice(0, 120).reverse();
-  if (points.length < 2) return '<p class="muted graph-empty">Response-time graph appears after two checks.</p>';
-  const max = Math.max(1, ...points.map(c => c.DurationMS));
-  const line = points.map((c, i) => `${(i / (points.length - 1) * 100).toFixed(2)},${(34 - Math.min(32, c.DurationMS / max * 32)).toFixed(2)}`).join(' ');
-  const failures = points.map((c, i) => c.State === 'healthy' ? '' : `<circle cx="${(i / (points.length - 1) * 100).toFixed(2)}" cy="36" r="1.8" class="failure-dot"/>`).join('');
-  return `<svg class="latency-chart" viewBox="0 0 100 38" preserveAspectRatio="none" aria-label="Recent response times"><polyline points="${line}"/>${failures}</svg>`;
+  if (points.length < 2) return `<section class="latency-panel latency-empty"><div><p class="latency-title">Response time</p><p class="muted">Waiting for another authenticated check</p></div><span class="latency-pulse" aria-hidden="true"></span></section>`;
+
+  const width = 320;
+  const top = 10;
+  const bottom = 78;
+  const durations = points.map(point => Math.max(0, Number(point.DurationMS) || 0));
+  const max = Math.max(1, ...durations) * 1.12;
+  const coordinates = points.map((point, index) => ({
+    x: index / (points.length - 1) * width,
+    y: bottom - durations[index] / max * (bottom - top),
+    point,
+  }));
+  const line = smoothPath(coordinates);
+  const area = `${line} L ${width} ${bottom} L 0 ${bottom} Z`;
+  const average = Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length);
+  const latest = durations[durations.length - 1];
+  const gradientID = `latency-fill-${Number(monitorID) || 0}`;
+  const markers = coordinates.map(({x, y, point}, index) => {
+    const failed = point.State !== 'healthy';
+    if (!failed && index !== coordinates.length - 1) return '';
+    const label = failed ? `${state(point.State)} · ${durations[index]} ms` : `Latest · ${latest} ms`;
+    return `<span class="chart-marker ${failed ? 'failure' : 'latest'}" style="left:${(x / width * 100).toFixed(3)}%;top:${(y / 96 * 100).toFixed(3)}%" title="${escapeHTML(label)}" aria-label="${escapeHTML(label)}"></span>`;
+  }).join('');
+
+  return `<section class="latency-panel"><div class="latency-head"><div><p class="latency-title">Response time</p><p class="latency-subtitle">Last ${points.length} authenticated checks</p></div><div class="latency-stats"><span><strong>${latest}</strong> ms<small>Latest</small></span><span><strong>${average}</strong> ms<small>Average</small></span></div></div><div class="chart-plot"><svg class="latency-chart" viewBox="0 0 ${width} 96" preserveAspectRatio="none" role="img" aria-label="Response times from ${shortTime(points[0].checkedAt)} to ${shortTime(points[points.length - 1].checkedAt)}"><defs><linearGradient id="${gradientID}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--blue)" stop-opacity=".28"/><stop offset="100%" stop-color="var(--blue)" stop-opacity="0"/></linearGradient></defs><g class="chart-grid"><line x1="0" y1="24" x2="320" y2="24"/><line x1="0" y1="51" x2="320" y2="51"/><line x1="0" y1="78" x2="320" y2="78"/></g><path class="chart-area" d="${area}" fill="url(#${gradientID})"/><path class="chart-line" d="${line}"/></svg>${markers}</div><div class="chart-axis"><span>${shortTime(points[0].checkedAt)}</span><span>History</span><span>${shortTime(points[points.length - 1].checkedAt)}</span></div></section>`;
 }
 function renderOverview(data, checksByID = {}, configsByID = new Map()) {
   $('#updated').textContent = `Updated ${date(data.generatedAt)}`;
-  $('#cards').innerHTML = data.monitors.length ? data.monitors.map(m => `<article class="card"><div class="section-title"><div><p class="provider-name">${escapeHTML(m.Name)}</p><span class="provider">${escapeHTML(m.Provider)}</span></div><div class="card-status"><span class="state ${m.State}">${state(m.State)}</span><button type="button" class="quiet edit-monitor" data-monitor-id="${m.id}">Edit settings</button></div></div><div class="metric-grid"><div class="metric"><strong>${fmt(m.availability)}</strong><span>Availability</span></div><div class="metric"><strong>${fmt(m.coverage)}</strong><span>Coverage</span></div><div class="metric"><strong>${m.p95Ms == null ? '—' : `${m.p95Ms} ms`}</strong><span>p95 response time</span></div><div class="metric"><strong>${date(m.lastCheck)}</strong><span>Last authenticated check</span></div></div><p class="graph-label">Recent authenticated response times</p>${chart(checksByID[m.id] || [])}</article>`).join('') : '<article class="panel">No providers configured. Add TorBox or Premiumize to begin monitoring.</article>';
+  $('#cards').innerHTML = data.monitors.length ? data.monitors.map(m => `<article class="card"><div class="section-title"><div><p class="provider-name">${escapeHTML(m.Name)}</p><span class="provider">${escapeHTML(m.Provider)}</span></div><div class="card-status"><span class="state ${m.State}">${state(m.State)}</span><button type="button" class="quiet edit-monitor" data-monitor-id="${m.id}">Edit settings</button></div></div><div class="metric-grid"><div class="metric"><strong>${fmt(m.availability)}</strong><span>Availability</span></div><div class="metric"><strong>${fmt(m.coverage)}</strong><span>Coverage</span></div><div class="metric"><strong>${m.p95Ms == null ? '—' : `${m.p95Ms} ms`}</strong><span>p95 response time</span></div><div class="metric"><strong>${date(m.lastCheck)}</strong><span>Last authenticated check</span></div></div>${chart(checksByID[m.id] || [], m.id)}</article>`).join('') : '<article class="panel">No providers configured. Add TorBox or Premiumize to begin monitoring.</article>';
   $('#comparison').innerHTML = data.monitors.length ? data.monitors.map(m => `<div class="bar-row"><span>${escapeHTML(m.Name)}</span><div class="bar"><i style="width:${Math.max(0,Math.min(100,m.availability || 0))}%"></i></div><strong>${fmt(m.availability)}</strong></div>`).join('') : '<p class="muted">Availability appears after authenticated checks run.</p>';
   document.querySelectorAll('.edit-monitor').forEach(button => button.addEventListener('click', () => openEditMonitor(configsByID.get(Number(button.dataset.monitorId)))));
 }
