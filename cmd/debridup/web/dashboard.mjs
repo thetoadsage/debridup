@@ -150,6 +150,12 @@ export function startDashboard({api, document, window}) {
       : `Updated ${escapeHTML(model.updatedLabel)}`;
   }
 
+  function setRefreshBusy(value) {
+    if (!refreshButton) return;
+    refreshButton.disabled = value;
+    refreshButton.textContent = value ? 'Refreshing…' : 'Refresh';
+  }
+
   function renderFailureStatus() {
     if (!status) return;
     if (lastPayload) {
@@ -184,11 +190,14 @@ export function startDashboard({api, document, window}) {
     const Controller = window.AbortController || AbortController;
     const controller = new Controller();
     const token = Symbol('dashboard-refresh');
-    if (refreshButton) refreshButton.disabled = true;
+    setRefreshBusy(true);
     if (!model) setBusy(busyElements, true);
     let request;
     try {
-      request = api(`/api/dashboard?range=${encodeURIComponent(range)}`, {signal: controller.signal});
+      request = api(`/api/dashboard?range=${encodeURIComponent(range)}`, {
+        signal: controller.signal,
+        cache: 'no-store',
+      });
     } catch (error) {
       request = Promise.reject(error);
     }
@@ -211,7 +220,7 @@ export function startDashboard({api, document, window}) {
       .finally(() => {
         if (activeRefresh?.token !== token) return;
         activeRefresh = null;
-        if (refreshButton) refreshButton.disabled = false;
+        setRefreshBusy(false);
         scheduleRefresh();
       });
     activeRefresh = {controller, promise, token};
@@ -227,7 +236,9 @@ export function startDashboard({api, document, window}) {
   }
 
   function manualRefresh() {
-    void refresh();
+    if (refreshButton?.disabled) return;
+    if (status) status.textContent = 'Refreshing dashboard…';
+    void refresh({supersede: true});
   }
 
   function retryRefresh(event) {

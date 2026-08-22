@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 
 import {
   createDashboardModel,
@@ -501,7 +502,7 @@ test('reverts the selected range when a range refresh fails and old data remains
   const requests = [];
   const api = (path, options) => {
     const request = deferredRequest(options.signal);
-    requests.push({path, request});
+    requests.push({path, options, request});
     return request.promise;
   };
   const dashboard = startDashboard({api, document, window});
@@ -552,7 +553,7 @@ test('disables and deduplicates manual refreshes while one is active', async () 
   const requests = [];
   const api = (path, options) => {
     const request = deferredRequest(options.signal);
-    requests.push({path, request});
+    requests.push({path, options, request});
     return request.promise;
   };
   const dashboard = startDashboard({api, document, window});
@@ -564,10 +565,22 @@ test('disables and deduplicates manual refreshes while one is active', async () 
   refreshButton.emit('click');
   assert.equal(requests.length, 2);
   assert.equal(refreshButton.disabled, true);
+  assert.equal(refreshButton.textContent, 'Refreshing…');
+  assert.equal(requests[1].options.cache, 'no-store');
+  assert.match(document.getElementById('dashboard-status').textContent, /Refreshing dashboard/);
   requests[1].request.resolve(dashboardPayload());
   await flushPromises();
   assert.equal(refreshButton.disabled, false);
+  assert.equal(refreshButton.textContent, 'Refresh');
   dashboard.stop();
+});
+
+test('sidebar provider navigation targets the provider table before incidents', () => {
+  const markup = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+  assert.match(markup, /class="nav-link" href="#providers-panel">Providers<\/a>/);
+  const providers = markup.indexOf('id="providers-panel"');
+  const incidents = markup.indexOf('id="incidents-panel"');
+  assert.ok(providers >= 0 && incidents >= 0 && providers < incidents);
 });
 
 test('keeps the last successful model on failure and renders its age with retry', async () => {
