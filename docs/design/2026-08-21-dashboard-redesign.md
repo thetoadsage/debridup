@@ -84,16 +84,20 @@ Accepted ranges are `24h`, `7d`, and `30d`. Invalid values return `400` with a s
 
 ```json
 {
-  "generated_at": "2026-08-21T14:32:18Z",
+  "generatedAt": 1787322738,
   "range": "24h",
   "summary": {},
-  "providers": [],
-  "series": [],
+  "providers": [
+    {
+      "id": 1,
+      "series": []
+    }
+  ],
   "incidents": []
 }
 ```
 
-Each provider entry contains its current state, summary metrics, pulse buckets, latest check, and data-quality state. Chart series use a server-selected bucket width to keep payloads bounded:
+`generatedAt` and the other API timestamps are Unix seconds. Each provider entry contains its current state, summary metrics, pulse buckets in its `series`, and latest check. Chart series use a server-selected bucket width to keep payloads bounded:
 
 | Range | Bucket width | Maximum points per series |
 | --- | ---: | ---: |
@@ -164,7 +168,7 @@ No live production data or credentials are used in fixtures, screenshots, tests,
 
 API errors use a consistent JSON shape with a stable code and safe user-facing message. Internal errors are logged with request context but never include authorization headers, provider tokens, encryption material, or decrypted notification configuration.
 
-Dashboard responses include `generated_at`. The client displays stale-data status when refreshes fail after a prior successful response. Monitoring continues independently of dashboard request failures.
+Dashboard responses include `generatedAt`. The client displays stale-data status when refreshes fail after a prior successful response. Monitoring continues independently of dashboard request failures.
 
 The readiness check verifies that the database can be queried. The existing lightweight health check remains suitable for liveness.
 
