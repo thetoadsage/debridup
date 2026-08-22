@@ -350,7 +350,12 @@ test('renders the maximum server bucket count into a bounded pulse grid', () => 
   }]);
 
   assert.equal((markup.match(/<button/g) || []).length, 96);
-  assert.match(markup, /class="pulse-track" style="--pulse-bucket-count:96"/);
+  assert.match(markup, /--pulse-bucket-count:96/);
+  assert.match(markup, /class="pulse-track"[^>]*role="toolbar"/);
+
+  // Roving tabindex: the whole row is one tab stop, not 96.
+  assert.equal((markup.match(/tabindex="0"/g) || []).length, 1);
+  assert.equal((markup.match(/tabindex="-1"/g) || []).length, 95);
 });
 
 test('renders explicit empty latency markup with fewer than two measured points', () => {
@@ -796,5 +801,99 @@ test('pauses scheduled refresh while hidden and refreshes on visibility restorat
   document.emit('visibilitychange');
   await flushPromises();
   assert.equal(calls, 2);
+  dashboard.stop();
+});
+
+test('refreshes an open drawer instead of leaving a frozen snapshot', () => {
+  const fixture = providerDrawerFixture();
+  const trigger = new FakeElement();
+  trigger.dataset.providerId = '7';
+  const drawer = createProviderDrawer(fixture.root);
+
+  drawer.open({id: 7, name: 'Provider Alpha', availabilityLabel: '99.50%', stateDurationLabel: '12 minutes', incidents: []}, trigger);
+  assert.equal(fixture.values.availability.textContent, '99.50%');
+
+  drawer.refresh([
+    {id: 7, name: 'Provider Alpha', availabilityLabel: '97.10%', stateDurationLabel: '18 minutes', incidents: []},
+    {id: 8, name: 'Provider Beta', availabilityLabel: '50.00%', incidents: []},
+  ]);
+  assert.equal(fixture.values.availability.textContent, '97.10%');
+  assert.equal(fixture.values['state-duration'].textContent, '18 minutes');
+
+  // A provider that is not the open one must not overwrite the panel.
+  drawer.refresh([{id: 8, name: 'Provider Beta', availabilityLabel: '50.00%', incidents: []}]);
+  assert.equal(fixture.values.availability.textContent, '97.10%');
+
+  // Once closed, refreshes are ignored entirely.
+  drawer.close();
+  drawer.refresh([{id: 7, name: 'Provider Alpha', availabilityLabel: '10.00%', incidents: []}]);
+  assert.equal(fixture.values.availability.textContent, '97.10%');
+});
+
+test('skips rewriting the DOM when a refresh returns unchanged data', async () => {
+  const document = new FakeDashboardDocument();
+  const window = new FakeDashboardWindow();
+  let generatedAt = 1787320800;
+  const dashboard = startDashboard({
+    api: () => Promise.resolve({...dashboardPayload(), generatedAt: generatedAt += 30}),
+    document,
+    window,
+  });
+  await dashboard.ready;
+
+  const pulse = document.getElementById('provider-pulse');
+  let writes = 0;
+  let markup = pulse.innerHTML;
+  Object.defineProperty(pulse, 'innerHTML', {
+    get: () => markup,
+    set: value => { writes += 1; markup = value; },
+    configurable: true,
+  });
+
+  // Same payload apart from generatedAt: the rendered regions must not be rewritten.
+  document.getElementById('refresh').emit('click');
+  await flushPromises();
+  assert.equal(writes, 0);
+  // The status line still has to advance, because it reports data age.
+  assert.match(document.getElementById('dashboard-status').innerHTML, /Updated/);
+
+  dashboard.stop();
+});
+
+test('notifies onRefresh so dependent panels follow the same cycle', async () => {
+  const document = new FakeDashboardDocument();
+  const window = new FakeDashboardWindow();
+  let notified = 0;
+  const dashboard = startDashboard({
+    api: () => Promise.resolve(dashboardPayload()),
+    document,
+    window,
+    onRefresh: () => { notified += 1; },
+  });
+  await dashboard.ready;
+  assert.equal(notified, 1);
+
+  document.getElementById('refresh').emit('click');
+  await flushPromises();
+  assert.equal(notified, 2);
+  dashboard.stop();
+});
+
+test('a throwing onRefresh cannot break the dashboard refresh loop', async () => {
+  const document = new FakeDashboardDocument();
+  const window = new FakeDashboardWindow();
+  let calls = 0;
+  const dashboard = startDashboard({
+    api: () => { calls += 1; return Promise.resolve(dashboardPayload()); },
+    document,
+    window,
+    onRefresh: () => { throw new Error('dependent panel failed'); },
+  });
+  await dashboard.ready;
+
+  document.getElementById('refresh').emit('click');
+  await flushPromises();
+  assert.equal(calls, 2);
+  assert.match(document.getElementById('dashboard-status').innerHTML, /Updated/);
   dashboard.stop();
 });

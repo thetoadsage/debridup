@@ -11,12 +11,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -321,9 +319,21 @@ func TestDashboardReadOnlyTransactionRejectsWritesAndRestoresConnection(t *testi
 	}
 }
 
+// authenticatedRequest issues a real session, so tests exercise the same
+// signing and lookup path as a signed-in browser.
 func authenticatedRequest(t *testing.T, a *app, method, target string) *http.Request {
 	t.Helper()
-	data := []byte(strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
+	if a.sessions == nil {
+		a.sessions = newSessionStore(a.db)
+	}
+	// Registered directly in the store: these tests cover handler behaviour,
+	// and some deliberately run without a migrated or open database. Session
+	// issuing, revocation, and persistence have their own tests.
+	id := "test-session"
+	a.sessions.mu.Lock()
+	a.sessions.active[id] = time.Now().Add(time.Hour).Unix()
+	a.sessions.mu.Unlock()
+	data := []byte(id)
 	mac := hmac.New(sha256.New, a.cookieKey)
 	_, _ = mac.Write(data)
 	value := base64.RawURLEncoding.EncodeToString(data) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
@@ -385,6 +395,11 @@ func seedDashboardFixture(t *testing.T, db *sql.DB, now time.Time) {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO incidents(monitor_id,opened_at,detected_at,initial_state,latest_state,summary) VALUES(?,?,?,?,?,?)`, ids[1], now.Add(-90*time.Minute).Unix(), now.Add(-90*time.Minute).Unix(), stateAPI, stateAPI, "Authenticated checks are failing."); err != nil {
+		t.Fatal(err)
+	}
+	// Raw checks were inserted in bulk rather than through recordResult, so the
+	// rollups are built here the same way the backfill migration builds them.
+	if err := rebuildRollups(context.Background(), db, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -457,85 +472,105 @@ func TestNearestRankDoesNotMutateInput(t *testing.T) {
 	}
 }
 
-func TestPulseState(t *testing.T) {
-	if got := pulseState(nil); got != "unknown" {
-		t.Fatalf("empty=%s", got)
+func TestSeriesFromRollupsClassifiesBucketState(t *testing.T) {
+	width := int64(900)
+	first := int64(1787313600)
+	p := func(v int64) *int64 { return &v }
+	points := []rollupPoint{
+		{BucketStart: first, Total: 2, Healthy: 2, SlowestMS: 120, P50MS: p(100), P95MS: p(120)},
+		{BucketStart: first + width, Total: 2, Healthy: 1, SlowestMS: 300, P50MS: p(100), P95MS: p(300)},
+		{BucketStart: first + 2*width, Total: 2, Healthy: 0, SlowestMS: 400, P50MS: p(350), P95MS: p(400)},
+		// first+3*width intentionally absent: a bucket with no checks.
 	}
-	if got := pulseState([]dashboardSample{{State: stateHealthy}}); got != "healthy" {
-		t.Fatalf("healthy=%s", got)
+	series := seriesFromRollups(points, first, first+4*width, width, 5)
+	if len(series) != 5 {
+		t.Fatalf("series length = %d, want 5", len(series))
 	}
-	if got := pulseState([]dashboardSample{{State: stateHealthy}, {State: stateAPI}}); got != "degraded" {
-		t.Fatalf("mixed=%s", got)
+	want := []string{"healthy", "degraded", "outage", "unknown", "unknown"}
+	for i, state := range want {
+		if series[i].State != state {
+			t.Fatalf("bucket %d state = %q, want %q", i, series[i].State, state)
+		}
+		if series[i].BucketStart != first+int64(i)*width {
+			t.Fatalf("bucket %d start = %d, want %d", i, series[i].BucketStart, first+int64(i)*width)
+		}
 	}
-	if got := pulseState([]dashboardSample{{State: stateAPI}, {State: stateConnection}}); got != "outage" {
-		t.Fatalf("failed=%s", got)
+	if series[1].Availability == nil || *series[1].Availability != 50 {
+		t.Fatalf("degraded availability = %v, want 50", series[1].Availability)
+	}
+	// A bucket with no checks carries no metrics and is not counted as downtime.
+	if series[3].Availability != nil || series[3].P50MS != nil || series[3].P95MS != nil {
+		t.Fatalf("unknown bucket must have no metrics: %#v", series[3])
+	}
+	if series[0].P50MS == nil || *series[0].P50MS != 100 || series[0].P95MS == nil || *series[0].P95MS != 120 {
+		t.Fatalf("stored percentiles not surfaced: %#v", series[0])
 	}
 }
 
-func TestAggregateSeriesProducesBoundedChronologicalBuckets(t *testing.T) {
-	end := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
-	spec, _ := parseDashboardRange("24h")
-	points := aggregateSeries(syntheticDaySamples(end), spec, end.Add(-spec.Window), end)
-	if len(points) > spec.MaxPoints {
-		t.Fatalf("points=%d", len(points))
+func TestSeriesFromRollupsRejectsDegenerateInput(t *testing.T) {
+	if got := seriesFromRollups(nil, 100, 0, 900, 5); len(got) != 0 {
+		t.Fatalf("reversed window should produce no points, got %d", len(got))
 	}
-	for i := 1; i < len(points); i++ {
-		if points[i].BucketStart <= points[i-1].BucketStart {
-			t.Fatal("points not chronological")
+	if got := seriesFromRollups(nil, 0, 900, 0, 5); len(got) != 0 {
+		t.Fatalf("zero width should produce no points, got %d", len(got))
+	}
+	if got := seriesFromRollups(nil, 0, 900, 900, 0); len(got) != 0 {
+		t.Fatalf("zero maxPoints should produce no points, got %d", len(got))
+	}
+}
+
+func TestBucketStartForSnapsDownToBoundary(t *testing.T) {
+	width := int64(900)
+	for _, test := range []struct{ at, want int64 }{
+		{1787313600, 1787313600},
+		{1787313601, 1787313600},
+		{1787314499, 1787313600},
+		{1787314500, 1787314500},
+		{-1, -900},
+	} {
+		if got := bucketStartFor(test.at, width); got != test.want {
+			t.Fatalf("bucketStartFor(%d) = %d, want %d", test.at, got, test.want)
 		}
 	}
 }
 
-func TestAggregateSeriesIgnoresPublicSamplesAndSummarizesCompletedChecks(t *testing.T) {
-	start := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC)
-	end := start.Add(30 * time.Minute)
-	spec := dashboardRange{Window: 30 * time.Minute, Bucket: 15 * time.Minute, MaxPoints: 2}
-	points := aggregateSeries([]dashboardSample{
-		{Source: "public", State: stateHealthy, DurationMS: 1, CheckedAt: start.Add(time.Minute)},
-		{Source: "authenticated", State: stateHealthy, DurationMS: 100, CheckedAt: start.Add(2 * time.Minute)},
-		{Source: "authenticated", State: stateHealthy, DurationMS: 200, CheckedAt: start.Add(4 * time.Minute)},
-		{Source: "authenticated", State: stateAPI, DurationMS: 300, CheckedAt: start.Add(6 * time.Minute)},
-		{Source: "authenticated", State: stateAPI, DurationMS: 400, CheckedAt: start.Add(16 * time.Minute)},
-		{Source: "authenticated", State: stateConnection, DurationMS: 500, CheckedAt: start.Add(17 * time.Minute)},
-	}, spec, start, end)
-	if len(points) != 2 {
-		t.Fatalf("points=%d", len(points))
-	}
-	first := points[0]
-	if first.State != "degraded" || first.Availability == nil || math.Abs(*first.Availability-200.0/3.0) > .000001 {
-		t.Fatalf("first=%#v", first)
-	}
-	if first.P50MS == nil || *first.P50MS != 200 || first.P95MS == nil || *first.P95MS != 300 {
-		t.Fatalf("first latency=%#v", first)
-	}
-	second := points[1]
-	if second.State != "outage" || second.Availability == nil || *second.Availability != 0 {
-		t.Fatalf("second=%#v", second)
-	}
-	if second.P50MS == nil || *second.P50MS != 400 || second.P95MS == nil || *second.P95MS != 500 {
-		t.Fatalf("second latency=%#v", second)
-	}
-}
-
-func TestAggregateSeriesMarksEmptyBucketsUnknownWithoutAvailability(t *testing.T) {
-	start := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC)
-	spec := dashboardRange{Window: 30 * time.Minute, Bucket: 15 * time.Minute, MaxPoints: 2}
-	points := aggregateSeries(nil, spec, start, start.Add(30*time.Minute))
-	if len(points) != 2 {
-		t.Fatalf("points=%d", len(points))
-	}
-	for _, point := range points {
-		if point.State != "unknown" || point.Availability != nil || point.P50MS != nil || point.P95MS != nil {
-			t.Fatalf("point=%#v", point)
+// Midnight must be a bucket boundary for every width, because the
+// checks-completed-today figure is summed from buckets at or after it.
+func TestMidnightIsABucketBoundaryForEveryWidth(t *testing.T) {
+	midnight := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC).Unix()
+	for _, width := range rollupBucketWidths {
+		if bucketStartFor(midnight, width) != midnight {
+			t.Fatalf("width %d does not align to midnight", width)
 		}
 	}
 }
 
-func syntheticDaySamples(end time.Time) []dashboardSample {
-	start := end.Add(-24 * time.Hour)
-	return []dashboardSample{
-		{Source: "authenticated", State: stateHealthy, DurationMS: 100, CheckedAt: start.Add(time.Minute)},
-		{Source: "authenticated", State: stateAPI, DurationMS: 200, CheckedAt: start.Add(2 * time.Hour)},
-		{Source: "authenticated", State: stateHealthy, DurationMS: 300, CheckedAt: end.Add(-time.Minute)},
+// The aligned window must cover exactly the documented range: MaxPoints
+// buckets of Bucket width equals Window for every supported range.
+func TestDashboardWindowCoversTheDocumentedRange(t *testing.T) {
+	for _, raw := range []string{"24h", "7d", "30d"} {
+		spec, err := parseDashboardRange(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if int64(spec.MaxPoints)*int64(spec.Bucket/time.Second) != int64(spec.Window/time.Second) {
+			t.Fatalf("%s: %d buckets of %s do not span %s", raw, spec.MaxPoints, spec.Bucket, spec.Window)
+		}
+		for _, now := range []time.Time{
+			time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC),  // exactly on a boundary
+			time.Date(2026, 8, 21, 12, 7, 30, 0, time.UTC), // mid-bucket
+			time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC),   // midnight
+		} {
+			first, last, width := dashboardWindow(spec, now)
+			if last >= now.Unix() {
+				t.Fatalf("%s at %s: last bucket %d is not before now", raw, now, last)
+			}
+			if first < now.Add(-spec.Window).Unix() {
+				t.Fatalf("%s at %s: first bucket %d precedes the window", raw, now, first)
+			}
+			if (last-first)/width+1 != int64(spec.MaxPoints) {
+				t.Fatalf("%s at %s: window holds %d buckets, want %d", raw, now, (last-first)/width+1, spec.MaxPoints)
+			}
+		}
 	}
 }

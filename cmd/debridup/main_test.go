@@ -2,16 +2,22 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"io"
+	"math"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -625,6 +631,34 @@ func TestClassifyProviderPayload(t *testing.T) {
 		{"deepbrid application failure", "deepbrid", map[string]any{"error": float64(1), "message": "Internal failure"}, stateAPI, "api_error"},
 		{"generic account response", "realdebrid", map[string]any{"id": float64(42)}, "", ""},
 		{"torrin stats response", "torrin", map[string]any{"stats": map[string]any{}, "plan": map[string]any{}}, "", ""},
+
+		// Classification reads only the provider's declared error fields.
+		// Previously the whole encoded payload was searched, so an unrelated
+		// field name or value containing "auth"/"token" forced auth_failed.
+		{
+			"rate limit is not an auth failure despite an unrelated auth field",
+			"premiumize",
+			map[string]any{"status": "error", "message": "rate limit exceeded", "authMethod": "apikey"},
+			stateAPI, "api_error",
+		},
+		{
+			"field names alone do not imply an auth failure",
+			"torbox",
+			map[string]any{"success": false, "detail": "queue is full", "tokenBucket": float64(0)},
+			stateAPI, "api_error",
+		},
+		{
+			"nested provider error text is still inspected",
+			"debridlink",
+			map[string]any{"success": false, "error": map[string]any{"error_description": "invalid access token"}},
+			stateAuthFailed, "authentication_rejected",
+		},
+		{
+			"error text outside the declared fields is ignored",
+			"offcloud",
+			map[string]any{"error": "server busy", "hint": "check your api key"},
+			stateAPI, "api_error",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -848,5 +882,452 @@ func TestManualMonitorCheckDistinguishesOverlapFromCapacity(t *testing.T) {
 	a.testMonitor(capacity, request)
 	if capacity.Code != http.StatusServiceUnavailable {
 		t.Fatalf("capacity status = %d, want %d", capacity.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestAuthenticatedEndpoint(t *testing.T) {
+	bearer := providerDefinition{Endpoint: "https://example.test/api/user", Auth: authBearer}
+	got, err := authenticatedEndpoint(bearer, "secret-value")
+	if err != nil {
+		t.Fatalf("authenticatedEndpoint() error = %v", err)
+	}
+	if got != "https://example.test/api/user" {
+		t.Fatalf("bearer endpoint must be unchanged, got %q", got)
+	}
+
+	query := providerDefinition{Endpoint: "https://example.test/v4/user?agent=debridup", Auth: authQueryParam, AuthParam: "apikey"}
+	got, err = authenticatedEndpoint(query, "secret value/with+chars")
+	if err != nil {
+		t.Fatalf("authenticatedEndpoint() error = %v", err)
+	}
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("result is not a valid URL: %v", err)
+	}
+	if parsed.Query().Get("apikey") != "secret value/with+chars" {
+		t.Fatalf("credential was not carried verbatim, got %q", parsed.Query().Get("apikey"))
+	}
+	if parsed.Query().Get("agent") != "debridup" {
+		t.Fatalf("existing query parameters must be preserved, got %q", got)
+	}
+}
+
+func TestEveryProviderDeclaresAuthAndErrorFields(t *testing.T) {
+	for id, definition := range providerDefinitions {
+		if definition.Auth == authQueryParam && definition.AuthParam == "" {
+			t.Fatalf("provider %q uses query-parameter auth without naming the parameter", id)
+		}
+		if len(definition.ErrorFields) == 0 {
+			t.Fatalf("provider %q declares no error fields, so payload errors cannot be classified", id)
+		}
+	}
+}
+
+func TestListIncidentsGroupsEventsOntoTheirIncident(t *testing.T) {
+	a := testApp(t)
+	if err := migrateDatabase(context.Background(), a.db); err != nil {
+		t.Fatal(err)
+	}
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := a.db.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	exec(`INSERT INTO monitors(id,provider,name,created_at,updated_at) VALUES(1,'torbox','TorBox',1,1),(2,'realdebrid','Real-Debrid',1,1)`)
+	exec(`INSERT INTO check_results(id,monitor_id,source,state,duration_ms,http_status,error_code,checked_at) VALUES(10,1,'authenticated','api_issue',5,503,'server_error',100)`)
+	// Two incidents on one monitor plus one on another, so a mis-grouped join
+	// would show up as events landing on the wrong incident.
+	exec(`INSERT INTO incidents(id,monitor_id,opened_at,detected_at,resolved_at,initial_state,latest_state,summary) VALUES
+		(1,1,100,105,180,'api_issue','healthy','First outage'),
+		(2,1,200,205,NULL,'auth_failed','auth_failed',NULL),
+		(3,2,300,305,NULL,'connection_issue','connection_issue','Beta down')`)
+	exec(`INSERT INTO incident_events(id,incident_id,type,new_state,created_at,check_id) VALUES
+		(1,1,'opened','api_issue',105,10),
+		(2,1,'recovered','healthy',180,NULL),
+		(3,2,'opened','auth_failed',205,NULL),
+		(4,3,'opened','connection_issue',305,NULL)`)
+
+	response := httptest.NewRecorder()
+	a.listIncidents(response, httptest.NewRequest(http.MethodGet, "/api/incidents", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	var incidents []struct {
+		ID          int64  `json:"ID"`
+		Name        string `json:"Name"`
+		LatestState string `json:"LatestState"`
+		Summary     string `json:"summary"`
+		ResolvedAt  *int64 `json:"resolvedAt"`
+		Events      []struct {
+			Type      string `json:"type"`
+			State     string `json:"state"`
+			Summary   string `json:"summary"`
+			CreatedAt int64  `json:"createdAt"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &incidents); err != nil {
+		t.Fatalf("decode: %v (body %s)", err, response.Body.String())
+	}
+	if len(incidents) != 3 {
+		t.Fatalf("got %d incidents, want 3", len(incidents))
+	}
+	// Ordered by opened_at DESC.
+	if incidents[0].ID != 3 || incidents[1].ID != 2 || incidents[2].ID != 1 {
+		t.Fatalf("unexpected incident order: %d,%d,%d", incidents[0].ID, incidents[1].ID, incidents[2].ID)
+	}
+
+	byID := map[int64]int{}
+	for i, incident := range incidents {
+		byID[incident.ID] = i
+	}
+	first := incidents[byID[1]]
+	if len(first.Events) != 2 {
+		t.Fatalf("incident 1 got %d events, want 2", len(first.Events))
+	}
+	if first.Events[0].Type != "opened" || first.Events[1].Type != "recovered" {
+		t.Fatalf("incident 1 events out of order: %+v", first.Events)
+	}
+	// The joined check row supplies the HTTP status used in the summary.
+	if !strings.Contains(first.Events[0].Summary, "503") {
+		t.Fatalf("incident 1 opened summary lost its check detail: %q", first.Events[0].Summary)
+	}
+	if first.Events[1].Summary != "Authenticated checks recovered and the incident was resolved." {
+		t.Fatalf("unexpected recovery summary: %q", first.Events[1].Summary)
+	}
+	// A resolved incident reports its initial state, not 'healthy'.
+	if first.LatestState != "api_issue" {
+		t.Fatalf("resolved incident LatestState = %q, want api_issue", first.LatestState)
+	}
+
+	second := incidents[byID[2]]
+	if len(second.Events) != 1 || second.Events[0].State != stateAuthFailed {
+		t.Fatalf("incident 2 events = %+v", second.Events)
+	}
+	// A NULL summary falls back to the state description.
+	if second.Summary != incidentStateDescription(stateAuthFailed) {
+		t.Fatalf("incident 2 summary = %q", second.Summary)
+	}
+	if second.ResolvedAt != nil {
+		t.Fatalf("incident 2 must be unresolved")
+	}
+
+	third := incidents[byID[3]]
+	if third.Name != "Real-Debrid" || len(third.Events) != 1 {
+		t.Fatalf("incident 3 = %+v", third)
+	}
+}
+
+func TestListIncidentsWithNoIncidentsReturnsEmptyArray(t *testing.T) {
+	a := testApp(t)
+	if err := migrateDatabase(context.Background(), a.db); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	a.listIncidents(response, httptest.NewRequest(http.MethodGet, "/api/incidents", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if body := strings.TrimSpace(response.Body.String()); body != "[]" {
+		t.Fatalf("body = %q, want []", body)
+	}
+}
+
+// TestOverviewMatchesReferenceImplementation pins the rewritten batched
+// overview to the per-monitor algorithm it replaced. The reference below is a
+// direct transcription of the original implementation.
+func TestOverviewMatchesReferenceImplementation(t *testing.T) {
+	a := testApp(t)
+	if err := migrateDatabase(context.Background(), a.db); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().Unix()
+	cutoff := now - int64(30*24*time.Hour/time.Second)
+	random := rand.New(rand.NewSource(20260822))
+
+	tx, err := a.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers := []string{"torbox", "premiumize", "alldebrid", "realdebrid", "torrin"}
+	for id := 1; id <= len(providers); id++ {
+		if _, err := tx.Exec(`INSERT INTO monitors(id,provider,name,created_at,updated_at) VALUES(?,?,?,?,?)`,
+			id, providers[id-1], providers[id-1], now, now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`INSERT INTO monitor_states(monitor_id,current_state,state_since,last_raw_state,last_check_at) VALUES(?,?,?,?,?)`,
+			id, stateHealthy, now, stateHealthy, now); err != nil {
+			t.Fatal(err)
+		}
+		// More than 1000 healthy samples on one monitor so the recency cap is
+		// actually exercised, and some samples deliberately outside the window.
+		samples := 300 + id*400
+		for i := 0; i < samples; i++ {
+			state := stateHealthy
+			switch {
+			case i%53 == 0:
+				state = stateAuthFailed
+			case i%37 == 0:
+				state = stateAPI
+			}
+			checkedAt := now - int64(i)*900
+			if _, err := tx.Exec(`INSERT INTO check_results(monitor_id,source,state,duration_ms,checked_at) VALUES(?,'authenticated',?,?,?)`,
+				id, state, int64(random.Intn(900)+10), checkedAt); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Public rows must never influence overview.
+		if _, err := tx.Exec(`INSERT INTO check_results(monitor_id,source,state,duration_ms,checked_at) VALUES(?,'public','healthy',1,?)`, id, now-60); err != nil {
+			t.Fatal(err)
+		}
+		for incident := 0; incident < id; incident++ {
+			opened := now - int64(incident+1)*86400
+			var resolved any
+			if incident%2 == 0 {
+				resolved = opened + 3600
+			}
+			if _, err := tx.Exec(`INSERT INTO incidents(monitor_id,opened_at,detected_at,resolved_at,initial_state,latest_state,summary) VALUES(?,?,?,?,?,?,?)`,
+				id, opened, opened+60, resolved, stateAPI, stateAPI, "seeded"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	// Checks were inserted in bulk rather than through recordResult, so the
+	// rollups that coverage is summed from are built here.
+	if err := rebuildRollups(context.Background(), a.db, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	a.overview(response, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		GeneratedAt int64 `json:"generatedAt"`
+		Monitors    []struct {
+			ID           int64    `json:"id"`
+			State        string   `json:"State"`
+			Availability *float64 `json:"availability"`
+			Coverage     *float64 `json:"coverage"`
+			P95MS        *int64   `json:"p95Ms"`
+			OpenIncident bool     `json:"openIncident"`
+		} `json:"monitors"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(payload.Monitors) != len(providers) {
+		t.Fatalf("got %d monitors, want %d", len(payload.Monitors), len(providers))
+	}
+	// Availability is measured against the handler's own clock. Use the
+	// timestamp it reported so the reference below is compared at the same
+	// instant rather than one captured before the request ran.
+	now = payload.GeneratedAt
+	cutoff = now - int64(30*24*time.Hour/time.Second)
+
+	for _, got := range payload.Monitors {
+		id := got.ID
+
+		// --- reference: coverage ---
+		var total, eligible int
+		if err := a.db.QueryRow(`SELECT COUNT(*),COUNT(CASE WHEN state!='auth_failed' THEN 1 END) FROM check_results WHERE monitor_id=? AND source='authenticated' AND checked_at>=?`, id, cutoff).Scan(&total, &eligible); err != nil {
+			t.Fatal(err)
+		}
+		var wantCoverage *float64
+		if total > 0 {
+			v := float64(eligible) / float64(total) * 100
+			wantCoverage = &v
+		}
+		assertFloatPointer(t, "coverage", id, got.Coverage, wantCoverage)
+
+		// --- reference: p95 over the most recent 1000 healthy checks ---
+		latencyRows, err := a.db.Query(`SELECT duration_ms FROM check_results WHERE monitor_id=? AND source='authenticated' AND checked_at>=? AND state='healthy' ORDER BY checked_at DESC LIMIT 1000`, id, cutoff)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var latencies []int64
+		for latencyRows.Next() {
+			var ms int64
+			if err := latencyRows.Scan(&ms); err != nil {
+				t.Fatal(err)
+			}
+			latencies = append(latencies, ms)
+		}
+		latencyRows.Close()
+		var wantP95 *int64
+		if len(latencies) > 0 {
+			sorted := append([]int64(nil), latencies...)
+			sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+			v := sorted[(len(sorted)*95+99)/100-1]
+			wantP95 = &v
+		}
+		if (got.P95MS == nil) != (wantP95 == nil) {
+			t.Fatalf("monitor %d p95 presence mismatch: got %v want %v", id, got.P95MS, wantP95)
+		}
+		if wantP95 != nil && *got.P95MS != *wantP95 {
+			t.Fatalf("monitor %d p95 = %d, want %d (over %d samples)", id, *got.P95MS, *wantP95, len(latencies))
+		}
+
+		// --- reference: confirmed availability ---
+		var firstCheck sql.NullInt64
+		if err := a.db.QueryRow(`SELECT MIN(checked_at) FROM check_results WHERE monitor_id=? AND source='authenticated'`, id).Scan(&firstCheck); err != nil {
+			t.Fatal(err)
+		}
+		var wantAvailability *float64
+		if firstCheck.Valid {
+			observedStart := max(firstCheck.Int64, cutoff)
+			periodRows, err := a.db.Query(`SELECT opened_at,resolved_at FROM incidents WHERE monitor_id=? AND opened_at<? AND (resolved_at IS NULL OR resolved_at>?) ORDER BY opened_at`, id, now, observedStart)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var periods []incidentPeriod
+			for periodRows.Next() {
+				var period incidentPeriod
+				var resolved sql.NullInt64
+				if err := periodRows.Scan(&period.OpenedAt, &resolved); err != nil {
+					t.Fatal(err)
+				}
+				if resolved.Valid {
+					period.ResolvedAt = resolved.Int64
+				}
+				periods = append(periods, period)
+			}
+			periodRows.Close()
+			wantAvailability = confirmedAvailability(observedStart, now, periods)
+		}
+		assertFloatPointer(t, "availability", id, got.Availability, wantAvailability)
+
+		// --- reference: open incident flag ---
+		var open int
+		if err := a.db.QueryRow(`SELECT COUNT(*) FROM incidents WHERE monitor_id=? AND resolved_at IS NULL`, id).Scan(&open); err != nil {
+			t.Fatal(err)
+		}
+		if got.OpenIncident != (open > 0) {
+			t.Fatalf("monitor %d openIncident = %t, want %t", id, got.OpenIncident, open > 0)
+		}
+	}
+}
+
+func assertFloatPointer(t *testing.T, label string, id int64, got, want *float64) {
+	t.Helper()
+	if (got == nil) != (want == nil) {
+		t.Fatalf("monitor %d %s presence mismatch: got %v want %v", id, label, got, want)
+	}
+	if want != nil && math.Abs(*got-*want) > 1e-9 {
+		t.Fatalf("monitor %d %s = %v, want %v", id, label, *got, *want)
+	}
+}
+
+func TestSecurityHeadersIncludeContentSecurityPolicy(t *testing.T) {
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/login.html", nil)
+	(&app{}).routes().ServeHTTP(response, request)
+
+	policy := response.Header().Get("Content-Security-Policy")
+	for _, directive := range []string{"default-src 'self'", "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'"} {
+		if !strings.Contains(policy, directive) {
+			t.Fatalf("CSP missing %q: %q", directive, policy)
+		}
+	}
+	// The app has no inline scripts or styles, so neither escape hatch belongs.
+	if strings.Contains(policy, "unsafe-inline") || strings.Contains(policy, "unsafe-eval") {
+		t.Fatalf("CSP must not relax script or style execution: %q", policy)
+	}
+}
+
+func TestStaticAssetsAreCacheableAndRevalidate(t *testing.T) {
+	routes := (&app{}).routes()
+
+	response := httptest.NewRecorder()
+	routes.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/app.css", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d", response.Code)
+	}
+	etag := response.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("static assets must carry an ETag")
+	}
+	if cacheControl := response.Header().Get("Cache-Control"); strings.Contains(cacheControl, "no-store") {
+		t.Fatalf("static assets must be cacheable, got %q", cacheControl)
+	}
+
+	// A conditional request revalidates instead of resending the body.
+	conditional := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/app.css", nil)
+	request.Header.Set("If-None-Match", etag)
+	routes.ServeHTTP(conditional, request)
+	if conditional.Code != http.StatusNotModified {
+		t.Fatalf("conditional status = %d, want 304", conditional.Code)
+	}
+	if conditional.Body.Len() != 0 {
+		t.Fatalf("304 must not carry a body, got %d bytes", conditional.Body.Len())
+	}
+	if conditional.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("304 must not be gzip encoded, got %q", conditional.Header().Get("Content-Encoding"))
+	}
+}
+
+func TestAPIResponsesStayUncached(t *testing.T) {
+	response := httptest.NewRecorder()
+	(&app{}).routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/dashboard?range=24h", nil))
+	if cacheControl := response.Header().Get("Cache-Control"); cacheControl != "no-store" {
+		t.Fatalf("API Cache-Control = %q, want no-store", cacheControl)
+	}
+}
+
+func TestCompressionAppliesToTextAndAnnouncesVary(t *testing.T) {
+	routes := (&app{}).routes()
+
+	request := httptest.NewRequest(http.MethodGet, "/app.css", nil)
+	request.Header.Set("Accept-Encoding", "gzip")
+	response := httptest.NewRecorder()
+	routes.ServeHTTP(response, request)
+
+	if response.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip", response.Header().Get("Content-Encoding"))
+	}
+	if !strings.Contains(response.Header().Get("Vary"), "Accept-Encoding") {
+		t.Fatalf("Vary = %q, want Accept-Encoding", response.Header().Get("Vary"))
+	}
+	reader, err := gzip.NewReader(response.Body)
+	if err != nil {
+		t.Fatalf("body is not valid gzip: %v", err)
+	}
+	decoded, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read gzip body: %v", err)
+	}
+	if !bytes.Contains(decoded, []byte("--bg")) {
+		t.Fatalf("decompressed stylesheet does not look like app.css (%d bytes)", len(decoded))
+	}
+
+	// Vary is announced even when the client does not accept gzip, so shared
+	// caches never hand a gzipped body to a client that cannot read it.
+	plain := httptest.NewRecorder()
+	routes.ServeHTTP(plain, httptest.NewRequest(http.MethodGet, "/app.css", nil))
+	if plain.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("unrequested Content-Encoding = %q", plain.Header().Get("Content-Encoding"))
+	}
+	if !strings.Contains(plain.Header().Get("Vary"), "Accept-Encoding") {
+		t.Fatalf("Vary must be set even without gzip, got %q", plain.Header().Get("Vary"))
+	}
+}
+
+func TestCompressibleType(t *testing.T) {
+	for _, contentType := range []string{"text/css", "text/html; charset=utf-8", "application/json", "image/svg+xml"} {
+		if !compressibleType(contentType) {
+			t.Fatalf("%q should be compressible", contentType)
+		}
+	}
+	for _, contentType := range []string{"image/png", "application/octet-stream", "font/woff2", ""} {
+		if compressibleType(contentType) {
+			t.Fatalf("%q should not be compressed", contentType)
+		}
 	}
 }

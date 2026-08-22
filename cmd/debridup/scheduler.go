@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"sync"
@@ -122,12 +123,26 @@ func (c *runCoordinator) Forget(id int64) {
 	delete(c.pendingImmediate, id)
 }
 
-func (a *app) scheduler() {
+func (a *app) scheduler(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+	// Skipped overlaps mean a monitor's interval is tighter than its provider's
+	// response time. The coordinator counts them; report increases so the
+	// operator can act on it instead of the signal staying invisible.
+	var reportedOverlaps uint64
 	for {
 		a.runDueMonitorsAt(time.Now())
-		<-ticker.C
+		if skipped := a.runs.SkippedOverlaps(); skipped > reportedOverlaps {
+			a.log().Warn("scheduled checks skipped while the previous run was still in flight",
+				"skipped_since_last_report", skipped-reportedOverlaps,
+				"skipped_total", skipped)
+			reportedOverlaps = skipped
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 	}
 }
 

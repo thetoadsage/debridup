@@ -21,6 +21,7 @@ export function createProviderDrawer(root) {
   let trigger = null;
   let triggerSelector = null;
   let openState = false;
+  let openProviderID = null;
 
   function setValue(name, value) {
     const target = root.querySelector(`[data-drawer-value="${name}"]`);
@@ -30,6 +31,7 @@ export function createProviderDrawer(root) {
   function close() {
     if (!openState) return;
     openState = false;
+    openProviderID = null;
     root.hidden = true;
     root.setAttribute('aria-hidden', 'true');
     if (overlay) overlay.hidden = true;
@@ -43,16 +45,7 @@ export function createProviderDrawer(root) {
     (replacementTrigger || capturedTrigger)?.focus?.();
   }
 
-  function open(provider = {}, nextTrigger = null) {
-    trigger = nextTrigger;
-    const providerID = Number(nextTrigger?.dataset?.providerId ?? provider?.id);
-    const bucketIndex = Number(nextTrigger?.dataset?.bucketIndex);
-    triggerSelector = Number.isFinite(providerID)
-      ? (nextTrigger?.dataset?.bucketIndex == null
-        ? `.provider-detail-trigger[data-provider-id="${providerID}"]`
-        : `.pulse-bucket[data-provider-id="${providerID}"][data-bucket-index="${bucketIndex}"]`)
-      : null;
-    openState = true;
+  function paint(provider = {}) {
     const rawState = SAFE_STATES.has(provider.state) ? provider.state : 'unknown';
     if (title) title.textContent = provider.name || 'Provider';
     if (state) {
@@ -72,6 +65,28 @@ export function createProviderDrawer(root) {
         ? incidents.map(incident => `<li><strong>${escapeHTML(incident.summary || 'Provider event')}</strong><span>${escapeHTML(incident.openedAtLabel || '')}</span></li>`).join('')
         : '<li class="muted">No incidents in this range.</li>';
     }
+  }
+
+  // The dashboard refreshes underneath an open drawer; re-apply the current
+  // values so it never shows a frozen snapshot.
+  function refresh(providers = []) {
+    if (!openState || openProviderID === null) return;
+    const provider = providers.find(item => Number(item?.id) === openProviderID);
+    if (provider) paint(provider);
+  }
+
+  function open(provider = {}, nextTrigger = null) {
+    trigger = nextTrigger;
+    const providerID = Number(nextTrigger?.dataset?.providerId ?? provider?.id);
+    const bucketIndex = Number(nextTrigger?.dataset?.bucketIndex);
+    triggerSelector = Number.isFinite(providerID)
+      ? (nextTrigger?.dataset?.bucketIndex == null
+        ? `.provider-detail-trigger[data-provider-id="${providerID}"]`
+        : `.pulse-bucket[data-provider-id="${providerID}"][data-bucket-index="${bucketIndex}"]`)
+      : null;
+    openState = true;
+    openProviderID = Number.isFinite(providerID) ? providerID : null;
+    paint(provider);
     if (overlay) overlay.hidden = false;
     root.hidden = false;
     root.setAttribute('aria-hidden', 'false');
@@ -115,5 +130,5 @@ export function createProviderDrawer(root) {
   overlay?.addEventListener('click', close);
   root.addEventListener('keydown', onKeydown);
 
-  return {open, close, destroy};
+  return {open, close, refresh, destroy};
 }

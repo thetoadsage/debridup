@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -18,10 +20,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/crypto/argon2"
@@ -50,6 +54,21 @@ type app struct {
 	logger    *slog.Logger
 	runs      *runCoordinator
 	cookieKey []byte
+	sessions  *sessionStore
+	logins    *loginLimiter
+
+	// The master key is fixed for the process lifetime, so the AEAD is built
+	// once instead of on every encrypt/decrypt.
+	aeadOnce sync.Once
+	aead     cipher.AEAD
+	aeadErr  error
+}
+
+func (a *app) cipher() (cipher.AEAD, error) {
+	a.aeadOnce.Do(func() {
+		a.aead, a.aeadErr = chacha20poly1305.NewX(a.key)
+	})
+	return a.aead, a.aeadErr
 }
 
 type monitor struct {
@@ -78,24 +97,42 @@ type incidentPeriod struct {
 	ResolvedAt int64
 }
 
+// providerAuth records how a provider expects its credential to be presented.
+// Every provider currently uses a bearer token; the field exists so the choice
+// is explicit per provider rather than an implicit property of authCheck, and
+// so switching one is a single-field change.
+type providerAuth uint8
+
+const (
+	authBearer providerAuth = iota
+	authQueryParam
+)
+
 type providerDefinition struct {
 	Endpoint       string
 	PublicEndpoint string
 	Method         string
+	Auth           providerAuth
+	// AuthParam names the query parameter carrying the credential when Auth is
+	// authQueryParam. It is ignored for authBearer.
+	AuthParam string
+	// ErrorFields lists the payload fields that carry a provider's own error
+	// text, so classification reads those instead of the whole response body.
+	ErrorFields []string
 }
 
 var providerDefinitions = map[string]providerDefinition{
-	"torbox":     {Endpoint: "https://api.torbox.app/v1/api/user/me", PublicEndpoint: "https://status.torbox.app/", Method: http.MethodGet},
-	"premiumize": {Endpoint: "https://www.premiumize.me/api/account/info", PublicEndpoint: "https://premiumize.reamaze.com/status", Method: http.MethodGet},
-	"alldebrid":  {Endpoint: "https://api.alldebrid.com/v4/user", PublicEndpoint: "https://api.alldebrid.com/v4/ping", Method: http.MethodGet},
-	"realdebrid": {Endpoint: "https://api.real-debrid.com/rest/1.0/user", PublicEndpoint: "https://api.real-debrid.com/rest/1.0/time", Method: http.MethodGet},
-	"torrin":     {Endpoint: "https://torrin.app/api/stats", PublicEndpoint: "https://torrin.app/api/stats/public", Method: http.MethodGet},
-	"pikpak":     {Endpoint: "https://user.mypikpak.com/v1/user/me", PublicEndpoint: "https://mypikpak.com/", Method: http.MethodGet},
-	"offcloud":   {Endpoint: "https://offcloud.com/api/account/info", PublicEndpoint: "https://offcloud.com/", Method: http.MethodGet},
-	"debridlink": {Endpoint: "https://debrid-link.com/api/v2/account/infos", PublicEndpoint: "https://www.debrid-link.com/webapp/status", Method: http.MethodGet},
-	"easydebrid": {Endpoint: "https://easydebrid.com/api/v1/user/details", PublicEndpoint: "https://easydebrid.com/", Method: http.MethodGet},
-	"debrider":   {Endpoint: "https://debrider.app/api/v1/tasks", PublicEndpoint: "https://stats.uptimerobot.com/shklobtEFJ/801337046", Method: http.MethodGet},
-	"deepbrid":   {Endpoint: "https://www.deepbrid.com/api/v1/user", PublicEndpoint: "https://www.deepbrid.com/api/v1/hosts", Method: http.MethodGet},
+	"torbox":     {Endpoint: "https://api.torbox.app/v1/api/user/me", PublicEndpoint: "https://status.torbox.app/", Method: http.MethodGet, Auth: authBearer, ErrorFields: []string{"detail", "error", "message"}},
+	"premiumize": {Endpoint: "https://www.premiumize.me/api/account/info", PublicEndpoint: "https://premiumize.reamaze.com/status", Method: http.MethodGet, Auth: authBearer, ErrorFields: []string{"message", "error"}},
+	"alldebrid":  {Endpoint: "https://api.alldebrid.com/v4/user", PublicEndpoint: "https://api.alldebrid.com/v4/ping", Method: http.MethodGet, Auth: authBearer, ErrorFields: []string{"error", "message", "code"}},
+	"realdebrid": {Endpoint: "https://api.real-debrid.com/rest/1.0/user", PublicEndpoint: "https://api.real-debrid.com/rest/1.0/time", Method: http.MethodGet, Auth: authBearer, ErrorFields: []string{"error", "error_code"}},
+	"torrin":     {Endpoint: "https://torrin.app/api/stats", PublicEndpoint: "https://torrin.app/api/stats/public", Method: http.MethodGet, Auth: authBearer, ErrorFields: []string{"error", "message"}},
+	"pikpak":     {Endpoint: "https://user.mypikpak.com/v1/user/me", PublicEndpoint: "https://mypikpak.com/", Method: http.MethodGet, Auth: authBearer, ErrorFields: []string{"error", "error_description", "error_code"}},
+	"offcloud":   {Endpoint: "https://offcloud.com/api/account/info", PublicEndpoint: "https://offcloud.com/", Method: http.MethodGet, Auth: authBearer, ErrorFields: []string{"error"}},
+	"debridlink": {Endpoint: "https://debrid-link.com/api/v2/account/infos", PublicEndpoint: "https://www.debrid-link.com/webapp/status", Method: http.MethodGet, Auth: authBearer, ErrorFields: []string{"error", "error_description"}},
+	"easydebrid": {Endpoint: "https://easydebrid.com/api/v1/user/details", PublicEndpoint: "https://easydebrid.com/", Method: http.MethodGet, Auth: authBearer, ErrorFields: []string{"error", "message"}},
+	"debrider":   {Endpoint: "https://debrider.app/api/v1/tasks", PublicEndpoint: "https://stats.uptimerobot.com/shklobtEFJ/801337046", Method: http.MethodGet, Auth: authBearer, ErrorFields: []string{"error", "message", "detail"}},
+	"deepbrid":   {Endpoint: "https://www.deepbrid.com/api/v1/user", PublicEndpoint: "https://www.deepbrid.com/api/v1/hosts", Method: http.MethodGet, Auth: authBearer, ErrorFields: []string{"message", "error"}},
 }
 
 type monitorState struct {
@@ -108,44 +145,112 @@ type monitorState struct {
 }
 
 func main() {
+	if err := run(); err != nil {
+		// Startup problems are ordinary misconfiguration (a missing key file, a
+		// short password); an operator needs the reason, not a stack dump.
+		slog.Default().Error("DebridUp could not start", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	maxConcurrentChecks, err := parseMaxConcurrentChecks(os.Getenv("DEBRIDUP_MAX_CONCURRENT_CHECKS"))
 	if err != nil {
-		panic(err)
-	}
-	dataDir := env("DEBRIDUP_DATA_DIR", "./data")
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
-		panic(err)
-	}
-	key, err := loadKey()
-	if err != nil {
-		panic(err)
-	}
-	db, err := openDatabase(filepath.Join(dataDir, "debridup.db"))
-	if err != nil {
-		panic(err)
-	}
-	defer db.Close()
-	cookieHash := sha256.Sum256(key)
-	a := &app{db: db, key: key, cookieKey: cookieHash[:], client: &http.Client{Timeout: 65 * time.Second}, logger: slog.Default(), runs: newRunCoordinator(maxConcurrentChecks)}
-	if err := migrateDatabase(context.Background(), db); err != nil {
-		panic(err)
-	}
-	if err := a.ensureAdmin(os.Getenv("DEBRIDUP_ADMIN_PASSWORD")); err != nil {
-		panic(err)
+		return err
 	}
 	retention, err := parseRetention(os.Getenv("DEBRIDUP_HISTORY_RETENTION"))
 	if err != nil {
-		panic(err)
+		return err
 	}
-	go a.scheduler()
-	go a.notificationWorker()
-	go a.retentionWorker(context.Background(), retention)
+	dataDir := env("DEBRIDUP_DATA_DIR", "./data")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return fmt.Errorf("create data directory %q: %w", dataDir, err)
+	}
+	key, err := loadKey()
+	if err != nil {
+		return err
+	}
+	db, err := openDatabase(filepath.Join(dataDir, "debridup.db"))
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer db.Close()
+
+	cookieHash := sha256.Sum256(key)
+	a := &app{db: db, key: key, cookieKey: cookieHash[:], client: &http.Client{Timeout: 65 * time.Second}, logger: slog.Default(), runs: newRunCoordinator(maxConcurrentChecks)}
+	if err := migrateDatabase(context.Background(), db); err != nil {
+		return fmt.Errorf("apply database migrations: %w", err)
+	}
+	if err := a.ensureAdmin(os.Getenv("DEBRIDUP_ADMIN_PASSWORD")); err != nil {
+		return err
+	}
+	a.sessions = newSessionStore(db)
+	a.logins = newLoginLimiter()
+	if err := a.sessions.load(context.Background()); err != nil {
+		return fmt.Errorf("load sessions: %w", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	var workers sync.WaitGroup
+	for _, worker := range []func(context.Context){
+		a.scheduler,
+		a.notificationWorker,
+		func(ctx context.Context) { a.retentionWorker(ctx, retention) },
+	} {
+		workers.Add(1)
+		go func(worker func(context.Context)) {
+			defer workers.Done()
+			worker(ctx)
+		}(worker)
+	}
+
 	addr := env("DEBRIDUP_ADDR", ":8080")
-	a.logger.Info("DebridUp started", "addr", addr)
-	server := &http.Server{Addr: addr, Handler: a.routes(), ReadHeaderTimeout: 10 * time.Second}
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		panic(err)
+	server := &http.Server{
+		Addr:    addr,
+		Handler: a.routes(),
+		// A manual provider test runs an authenticated check inline and may take
+		// up to the 60s per-monitor timeout, so the write budget sits above it.
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      90 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
+	a.logger.Info("DebridUp started", "addr", addr)
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.ListenAndServe()
+	}()
+
+	select {
+	case err := <-serveErr:
+		stop()
+		workers.Wait()
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("serve %s: %w", addr, err)
+		}
+		return nil
+	case <-ctx.Done():
+	}
+
+	a.logger.Info("DebridUp shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	shutdownErr := server.Shutdown(shutdownCtx)
+	workers.Wait()
+	if shutdownErr != nil {
+		return fmt.Errorf("shut down cleanly: %w", shutdownErr)
+	}
+	return nil
+}
+
+// log returns a usable logger even when the app was built without one.
+func (a *app) log() *slog.Logger {
+	if a.logger != nil {
+		return a.logger
+	}
+	return slog.Default()
 }
 
 func env(k, fallback string) string {
@@ -225,7 +330,7 @@ func verifyPassword(encoded, password string) bool {
 }
 
 func (a *app) encrypt(plain []byte, aad string) ([]byte, []byte, error) {
-	c, err := chacha20poly1305.NewX(a.key)
+	c, err := a.cipher()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -236,7 +341,7 @@ func (a *app) encrypt(plain []byte, aad string) ([]byte, []byte, error) {
 	return nonce, c.Seal(nil, nonce, plain, []byte(aad)), nil
 }
 func (a *app) decrypt(nonce, ciphertext []byte, aad string) ([]byte, error) {
-	c, err := chacha20poly1305.NewX(a.key)
+	c, err := a.cipher()
 	if err != nil {
 		return nil, err
 	}
@@ -264,13 +369,132 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("PUT /api/notifications/ntfy", a.auth(a.putNtfy))
 	mux.HandleFunc("POST /api/notifications/ntfy/test", a.auth(a.testNtfy))
 	static, _ := fs.Sub(webFS, "web")
-	files := http.FileServer(http.FS(static))
+	files := staticFileServer(static)
 	mux.Handle("GET /login.html", files)
 	mux.Handle("GET /login.js", files)
 	mux.Handle("GET /theme-init.js", files)
 	mux.Handle("GET /app.css", files)
 	mux.Handle("/", a.auth(func(w http.ResponseWriter, r *http.Request) { files.ServeHTTP(w, r) }))
-	return securityHeaders(mux)
+	return securityHeaders(compress(mux))
+}
+
+// buildETag derives a single tag from the embedded asset bundle. The files only
+// change when the binary does, so one tag for the whole set is sufficient and
+// needs no build step.
+var buildETag = sync.OnceValue(func() string {
+	digest := sha256.New()
+	_ = fs.WalkDir(webFS, "web", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+		contents, readErr := webFS.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		_, _ = digest.Write([]byte(path))
+		_, _ = digest.Write(contents)
+		return nil
+	})
+	return `"` + base64.RawURLEncoding.EncodeToString(digest.Sum(nil)[:16]) + `"`
+})
+
+// staticFileServer serves the embedded assets as cacheable resources. The
+// blanket no-store in securityHeaders is right for API responses carrying
+// provider state, but it made every navigation refetch all CSS and JS.
+func staticFileServer(static fs.FS) http.Handler {
+	files := http.FileServer(http.FS(static))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		etag := buildETag()
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", "public, max-age=300, must-revalidate")
+		if match := r.Header.Get("If-None-Match"); match != "" {
+			for _, candidate := range strings.Split(match, ",") {
+				if strings.TrimSpace(candidate) == etag {
+					w.WriteHeader(http.StatusNotModified)
+					return
+				}
+			}
+		}
+		files.ServeHTTP(w, r)
+	})
+}
+
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	writer      *gzip.Writer
+	compressing bool
+	wroteHeader bool
+}
+
+// compressibleTypes are the response bodies worth gzipping. Everything else
+// (images, already-compressed payloads) is passed through untouched.
+func compressibleType(contentType string) bool {
+	base, _, _ := strings.Cut(contentType, ";")
+	base = strings.TrimSpace(base)
+	if strings.HasPrefix(base, "text/") {
+		return true
+	}
+	switch base {
+	case "application/json", "application/javascript", "application/xhtml+xml", "image/svg+xml":
+		return true
+	}
+	return false
+}
+
+func (g *gzipResponseWriter) WriteHeader(status int) {
+	if g.wroteHeader {
+		return
+	}
+	g.wroteHeader = true
+	header := g.ResponseWriter.Header()
+	// A 304 and a 204 must not carry a body, so they are never wrapped.
+	if status == http.StatusOK && compressibleType(header.Get("Content-Type")) {
+		g.compressing = true
+		header.Set("Content-Encoding", "gzip")
+		header.Del("Content-Length")
+	}
+	g.ResponseWriter.WriteHeader(status)
+}
+
+func (g *gzipResponseWriter) Write(p []byte) (int, error) {
+	if !g.wroteHeader {
+		if g.ResponseWriter.Header().Get("Content-Type") == "" {
+			g.ResponseWriter.Header().Set("Content-Type", http.DetectContentType(p))
+		}
+		g.WriteHeader(http.StatusOK)
+	}
+	if g.compressing {
+		return g.writer.Write(p)
+	}
+	return g.ResponseWriter.Write(p)
+}
+
+var gzipWriters = sync.Pool{New: func() any { return gzip.NewWriter(io.Discard) }}
+
+// compress gzips text responses for clients that accept it. The dashboard
+// payload is highly repetitive JSON, which matters most over a VPN or a slow
+// remote link.
+func compress(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Vary is set regardless, so a shared cache never serves a gzipped body
+		// to a client that did not ask for one.
+		w.Header().Add("Vary", "Accept-Encoding")
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		writer := gzipWriters.Get().(*gzip.Writer)
+		writer.Reset(w)
+		wrapped := &gzipResponseWriter{ResponseWriter: w, writer: writer}
+		defer func() {
+			if wrapped.compressing {
+				_ = writer.Close()
+			}
+			writer.Reset(io.Discard)
+			gzipWriters.Put(writer)
+		}()
+		next.ServeHTTP(wrapped, r)
+	})
 }
 
 func (a *app) readiness(w http.ResponseWriter, r *http.Request) {
@@ -281,11 +505,19 @@ func (a *app) readiness(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// contentSecurityPolicy is strict because every script and style is
+// same-origin and embedded, there are no inline handlers, and nothing external
+// is loaded.
+const contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
+		// Default to no-store; the static handler replaces this for embedded
+		// assets, which carry no account state and change only on deploy.
 		w.Header().Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)
 	})
@@ -304,31 +536,43 @@ func (a *app) auth(next http.HandlerFunc) http.HandlerFunc {
 		next(w, r)
 	}
 }
-func (a *app) sessionOK(r *http.Request) bool {
+
+// sessionCookie returns the session id carried by a correctly signed cookie.
+func (a *app) sessionCookie(r *http.Request) (string, bool) {
 	c, err := r.Cookie("debridup_session")
 	if err != nil {
-		return false
+		return "", false
 	}
 	p := strings.Split(c.Value, ".")
 	if len(p) != 2 {
-		return false
+		return "", false
 	}
 	data, err := base64.RawURLEncoding.DecodeString(p[0])
 	if err != nil {
-		return false
+		return "", false
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(p[1])
 	if err != nil {
-		return false
+		return "", false
 	}
 	mac := hmac.New(sha256.New, a.cookieKey)
 	mac.Write(data)
 	if !hmac.Equal(sig, mac.Sum(nil)) {
+		return "", false
+	}
+	return string(data), true
+}
+
+func (a *app) sessionOK(r *http.Request) bool {
+	id, signed := a.sessionCookie(r)
+	if !signed || a.sessions == nil {
 		return false
 	}
-	until, err := strconv.ParseInt(string(data), 10, 64)
-	return err == nil && time.Now().Unix() < until
+	// The signature only proves the cookie came from this server. Validity is
+	// decided by the session record, so signing out actually revokes access.
+	return a.sessions.valid(id, time.Now())
 }
+
 func (a *app) login(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Password string `json:"password"`
@@ -336,21 +580,56 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
+	if a.sessions == nil || a.logins == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "sign-in is unavailable"})
+		return
+	}
+
+	now := time.Now()
+	key := clientKey(r)
+	if wait := a.logins.lockedFor(key, now); wait > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many sign-in attempts, try again shortly"})
+		return
+	}
+	// Verifying a password costs 64 MiB of Argon2id memory. Bound how many run
+	// at once so a burst of unauthenticated requests cannot exhaust the host.
+	if !a.logins.acquireHashSlot(r.Context()) {
+		w.Header().Set("Retry-After", "5")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "sign-in is busy, try again shortly"})
+		return
+	}
 	var hash string
-	_ = a.db.QueryRow("SELECT value FROM settings WHERE key='admin_hash'").Scan(&hash)
-	if !verifyPassword(hash, in.Password) {
+	_ = a.db.QueryRowContext(r.Context(), "SELECT value FROM settings WHERE key='admin_hash'").Scan(&hash)
+	verified := verifyPassword(hash, in.Password)
+	a.logins.releaseHashSlot()
+
+	if !verified {
+		a.logins.recordFailure(key, now)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
 		return
 	}
-	data := []byte(strconv.FormatInt(time.Now().Add(24*time.Hour).Unix(), 10))
+	a.logins.recordSuccess(key)
+
+	id, expiresAt, err := a.sessions.issue(r.Context(), now)
+	if err != nil {
+		a.log().Error("issue session", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not start a session"})
+		return
+	}
+	data := []byte(id)
 	mac := hmac.New(sha256.New, a.cookieKey)
 	mac.Write(data)
 	value := base64.RawURLEncoding.EncodeToString(data) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-	http.SetCookie(w, &http.Cookie{Name: "debridup_session", Value: value, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: 86400, Secure: r.TLS != nil})
+	http.SetCookie(w, &http.Cookie{Name: "debridup_session", Value: value, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: int(time.Unix(expiresAt, 0).Sub(now).Seconds()), Secure: r.TLS != nil})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
+
 func (a *app) logout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: "debridup_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
+	if id, signed := a.sessionCookie(r); signed && a.sessions != nil {
+		a.sessions.revoke(r.Context(), id)
+	}
+	http.SetCookie(w, &http.Cookie{Name: "debridup_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -376,8 +655,15 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func (a *app) retentionWorker(ctx context.Context, retention time.Duration) {
 	prune := func() {
-		if _, err := pruneHistory(ctx, a.db, time.Now().UTC().Add(-retention)); err != nil {
-			a.logger.Error("history prune failed", "error", err)
+		now := time.Now().UTC()
+		if _, err := pruneHistory(ctx, a.db, now.Add(-retention)); err != nil {
+			a.log().Error("history prune failed", "error", err)
+		}
+		if a.sessions != nil {
+			a.sessions.prune(ctx, now)
+		}
+		if a.logins != nil {
+			a.logins.forgetStale(now)
 		}
 	}
 	prune()
@@ -403,11 +689,17 @@ func (a *app) authCheck(m monitor, credential string) checkResult {
 	if !ok {
 		return checkResult{State: stateAPI, ErrorCode: "unsupported_provider", CheckedAt: started}
 	}
-	req, err := http.NewRequestWithContext(ctx, provider.Method, provider.Endpoint, nil)
+	endpoint, err := authenticatedEndpoint(provider, credential)
 	if err != nil {
 		return checkResult{State: stateConnection, ErrorCode: "request_build", CheckedAt: started}
 	}
-	req.Header.Set("Authorization", "Bearer "+credential)
+	req, err := http.NewRequestWithContext(ctx, provider.Method, endpoint, nil)
+	if err != nil {
+		return checkResult{State: stateConnection, ErrorCode: "request_build", CheckedAt: started}
+	}
+	if provider.Auth == authBearer {
+		req.Header.Set("Authorization", "Bearer "+credential)
+	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "DebridUp/1.0")
 	resp, err := a.client.Do(req)
@@ -460,42 +752,91 @@ func (a *app) authCheck(m monitor, credential string) checkResult {
 	return r
 }
 
+func authenticatedEndpoint(provider providerDefinition, credential string) (string, error) {
+	if provider.Auth != authQueryParam || provider.AuthParam == "" {
+		return provider.Endpoint, nil
+	}
+	parsed, err := url.Parse(provider.Endpoint)
+	if err != nil {
+		return "", err
+	}
+	query := parsed.Query()
+	query.Set(provider.AuthParam, credential)
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
+}
+
 func classifyProviderPayload(provider string, payload any) (string, string) {
 	object, isObject := payload.(map[string]any)
 	if !isObject {
 		return "", ""
 	}
+	definition := providerDefinitions[provider]
 	switch provider {
 	case "torbox":
 		if success, present := object["success"].(bool); present && !success {
-			return classifyPayloadError(object)
+			return classifyPayloadError(object, definition.ErrorFields)
 		}
 	case "premiumize", "alldebrid":
 		if status, present := object["status"].(string); present && !strings.EqualFold(status, "success") {
-			return classifyPayloadError(object)
+			return classifyPayloadError(object, definition.ErrorFields)
 		}
 	case "debridlink":
 		if success, present := object["success"].(bool); present && !success {
-			return classifyPayloadError(object)
+			return classifyPayloadError(object, definition.ErrorFields)
 		}
 	case "deepbrid":
 		if errorValue, present := object["error"].(float64); present && errorValue != 0 {
-			return classifyPayloadError(object)
+			return classifyPayloadError(object, definition.ErrorFields)
 		}
 	case "offcloud":
 		if _, present := object["error"]; present {
-			return classifyPayloadError(object)
+			return classifyPayloadError(object, definition.ErrorFields)
 		}
 	}
 	return "", ""
 }
 
-func classifyPayloadError(payload map[string]any) (string, string) {
-	encoded, _ := json.Marshal(payload)
-	message := strings.ToLower(string(encoded))
-	for _, marker := range []string{"auth", "apikey", "api key", "token", "credential", "unauthor", "logged in", "login"} {
-		if strings.Contains(message, marker) {
-			return stateAuthFailed, "authentication_rejected"
+var authenticationMarkers = []string{"auth", "apikey", "api key", "token", "credential", "unauthor", "logged in", "login"}
+
+// collectErrorText gathers the string values reachable from one payload field.
+// A provider may report an error as a bare string, or as a nested object such
+// as {"error": {"code": "AUTH_BAD_APIKEY", "message": "..."}}.
+func collectErrorText(value any, depth int, out *[]string) {
+	if depth > 3 {
+		return
+	}
+	switch typed := value.(type) {
+	case string:
+		*out = append(*out, typed)
+	case map[string]any:
+		for _, nested := range typed {
+			collectErrorText(nested, depth+1, out)
+		}
+	case []any:
+		for _, nested := range typed {
+			collectErrorText(nested, depth+1, out)
+		}
+	}
+}
+
+// classifyPayloadError inspects only the provider's declared error fields.
+// Scanning the whole encoded payload used to match field *names* and unrelated
+// values, so a rate-limit error alongside a field like "authMethod" was
+// reported as an authentication failure.
+func classifyPayloadError(payload map[string]any, fields []string) (string, string) {
+	var texts []string
+	for _, field := range fields {
+		if value, present := payload[field]; present {
+			collectErrorText(value, 0, &texts)
+		}
+	}
+	for _, text := range texts {
+		lowered := strings.ToLower(text)
+		for _, marker := range authenticationMarkers {
+			if strings.Contains(lowered, marker) {
+				return stateAuthFailed, "authentication_rejected"
+			}
 		}
 	}
 	return stateAPI, "api_error"
@@ -545,6 +886,11 @@ func (a *app) recordResult(m monitor, source string, r checkResult) (int64, erro
 	checkID, _ := res.LastInsertId()
 	if source != "authenticated" {
 		return checkID, tx.Commit()
+	}
+	// Dashboard buckets are maintained here, in the same transaction as the
+	// check, so a snapshot never sees a summary that disagrees with the raw rows.
+	if err = refreshRollupsFor(context.Background(), tx, m.ID, r.CheckedAt.Unix()); err != nil {
+		return 0, err
 	}
 	ms, err := stateFor(tx, m.ID, r.CheckedAt.Unix())
 	if err != nil {
@@ -756,11 +1102,6 @@ func (a *app) monitorSecret(id int64) (string, error) {
 }
 
 func (a *app) listMonitors(w http.ResponseWriter, r *http.Request) {
-	ms, err := a.monitors()
-	if err != nil {
-		writeJSON(w, 500, map[string]string{"error": "could not load monitors"})
-		return
-	}
 	type item struct {
 		monitor
 		State      string `json:"state"`
@@ -768,12 +1109,36 @@ func (a *app) listMonitors(w http.ResponseWriter, r *http.Request) {
 		LastCheck  *int64 `json:"lastCheck"`
 		Configured bool   `json:"configured"`
 	}
-	out := make([]item, 0, len(ms))
-	for _, m := range ms {
+	// One query: the per-monitor state lookup and the secret-existence count
+	// used to be issued separately for every row.
+	rows, err := a.db.QueryContext(r.Context(), `
+	SELECT m.id,m.provider,m.name,m.enabled,m.interval_seconds,m.timeout_seconds,m.failure_threshold,m.recovery_threshold,m.public_check,
+	       s.current_state,s.state_since,s.last_check_at,
+	       EXISTS(SELECT 1 FROM monitor_secrets ms WHERE ms.monitor_id=m.id)
+	FROM monitors m LEFT JOIN monitor_states s ON s.monitor_id=m.id
+	ORDER BY m.id`)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not load monitors"})
+		return
+	}
+	defer rows.Close()
+	out := make([]item, 0)
+	for rows.Next() {
 		var i item
-		i.monitor = m
+		var enabled, public, configured int
+		var currentState sql.NullString
 		var stateSince, lastCheck sql.NullInt64
-		_ = a.db.QueryRow(`SELECT current_state,state_since,last_check_at FROM monitor_states WHERE monitor_id=?`, m.ID).Scan(&i.State, &stateSince, &lastCheck)
+		if err = rows.Scan(&i.ID, &i.Provider, &i.Name, &enabled, &i.IntervalSeconds, &i.TimeoutSeconds, &i.FailureThreshold, &i.RecoveryThreshold, &public,
+			&currentState, &stateSince, &lastCheck, &configured); err != nil {
+			writeJSON(w, 500, map[string]string{"error": "could not load monitors"})
+			return
+		}
+		i.Enabled = enabled == 1
+		i.PublicCheck = public == 1
+		i.Configured = configured == 1
+		if currentState.Valid {
+			i.State = currentState.String
+		}
 		if stateSince.Valid {
 			v := stateSince.Int64
 			i.StateSince = &v
@@ -782,16 +1147,18 @@ func (a *app) listMonitors(w http.ResponseWriter, r *http.Request) {
 			v := lastCheck.Int64
 			i.LastCheck = &v
 		}
-		var n int
-		_ = a.db.QueryRow(`SELECT COUNT(*) FROM monitor_secrets WHERE monitor_id=?`, m.ID).Scan(&n)
-		i.Configured = n > 0
 		if i.State == "" {
 			i.State = "checking"
 		}
 		out = append(out, i)
 	}
+	if err = rows.Err(); err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not load monitors"})
+		return
+	}
 	writeJSON(w, 200, out)
 }
+
 func (a *app) createMonitor(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Provider          string `json:"provider"`
@@ -964,6 +1331,7 @@ func (a *app) deleteMonitor(w http.ResponseWriter, r *http.Request) {
 		`DELETE FROM incident_events WHERE incident_id IN (SELECT id FROM incidents WHERE monitor_id=?)`,
 		`DELETE FROM incidents WHERE monitor_id=?`,
 		`DELETE FROM check_results WHERE monitor_id=?`,
+		`DELETE FROM check_rollups WHERE monitor_id=?`,
 		`DELETE FROM monitor_states WHERE monitor_id=?`,
 		`DELETE FROM monitor_secrets WHERE monitor_id=?`,
 	}
@@ -1028,6 +1396,7 @@ func (a *app) resetHistory(monitorID *int64) error {
 			`DELETE FROM incident_events`,
 			`DELETE FROM incidents`,
 			`DELETE FROM check_results`,
+			`DELETE FROM check_rollups`,
 			`DELETE FROM monitor_states`,
 		}
 		for _, statement := range statements {
@@ -1047,6 +1416,7 @@ func (a *app) resetHistory(monitorID *int64) error {
 		`DELETE FROM incident_events WHERE incident_id IN (SELECT id FROM incidents WHERE monitor_id=?)`,
 		`DELETE FROM incidents WHERE monitor_id=?`,
 		`DELETE FROM check_results WHERE monitor_id=?`,
+		`DELETE FROM check_rollups WHERE monitor_id=?`,
 		`DELETE FROM monitor_states WHERE monitor_id=?`,
 	}
 	for _, statement := range statements {
@@ -1135,12 +1505,16 @@ func (a *app) listChecks(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, out)
 }
+
+// overviewLatencySamples caps how many recent healthy checks the overview p95
+// considers, preserving the figure this endpoint has always reported.
+const overviewLatencySamples = 1000
+
+// coverageBucketWidth is the rollup width the coverage figure is summed from.
+// It is the widest available, so the fewest rows are read.
+var coverageBucketWidth = rollupBucketWidths[len(rollupBucketWidths)-1]
+
 func (a *app) overview(w http.ResponseWriter, r *http.Request) {
-	ms, err := a.monitors()
-	if err != nil {
-		writeJSON(w, 500, map[string]string{"error": "could not load overview"})
-		return
-	}
 	type item struct {
 		ID                    int64 `json:"id"`
 		Name, Provider, State string
@@ -1150,73 +1524,167 @@ func (a *app) overview(w http.ResponseWriter, r *http.Request) {
 		P95MS                 *int64   `json:"p95Ms"`
 		OpenIncident          bool     `json:"openIncident"`
 	}
-	out := make([]item, 0, len(ms))
+
+	ctx := r.Context()
 	now := time.Now().Unix()
 	cutoff := now - int64(30*24*time.Hour/time.Second)
-	for _, m := range ms {
-		v := item{ID: m.ID, Name: m.Name, Provider: m.Provider, State: "checking"}
+	fail := func() { writeJSON(w, 500, map[string]string{"error": "could not load overview"}) }
+
+	// Previously six queries per monitor. Each block below is one query across
+	// all monitors, grouped by monitor_id.
+	rows, err := a.db.QueryContext(ctx, `
+	SELECT m.id,m.name,m.provider,COALESCE(s.current_state,'checking'),s.last_check_at
+	FROM monitors m LEFT JOIN monitor_states s ON s.monitor_id=m.id ORDER BY m.id`)
+	if err != nil {
+		fail()
+		return
+	}
+	out := make([]item, 0)
+	position := make(map[int64]int)
+	for rows.Next() {
+		var v item
 		var last sql.NullInt64
-		_ = a.db.QueryRow(`SELECT current_state,last_check_at FROM monitor_states WHERE monitor_id=?`, m.ID).Scan(&v.State, &last)
+		if err = rows.Scan(&v.ID, &v.Name, &v.Provider, &v.State, &last); err != nil {
+			rows.Close()
+			fail()
+			return
+		}
 		if last.Valid {
 			x := last.Int64
 			v.LastCheck = &x
 		}
-		var firstCheck sql.NullInt64
-		_ = a.db.QueryRow(`SELECT MIN(checked_at) FROM check_results WHERE monitor_id=? AND source='authenticated'`, m.ID).Scan(&firstCheck)
-		if firstCheck.Valid {
-			observedStart := max(firstCheck.Int64, cutoff)
-			incidentRows, queryErr := a.db.Query(`SELECT opened_at,resolved_at FROM incidents WHERE monitor_id=? AND opened_at<? AND (resolved_at IS NULL OR resolved_at>?) ORDER BY opened_at`, m.ID, now, observedStart)
-			var periods []incidentPeriod
-			if queryErr == nil {
-				periodsValid := true
-				for incidentRows.Next() {
-					var period incidentPeriod
-					var resolved sql.NullInt64
-					if incidentRows.Scan(&period.OpenedAt, &resolved) != nil {
-						periodsValid = false
-						break
-					}
-					if resolved.Valid {
-						period.ResolvedAt = resolved.Int64
-					}
-					periods = append(periods, period)
-				}
-				if incidentRows.Err() != nil {
-					periodsValid = false
-				}
-				incidentRows.Close()
-				if periodsValid {
-					v.Availability = confirmedAvailability(observedStart, now, periods)
-				}
-			}
-		}
-		var total, eligible int
-		_ = a.db.QueryRow(`SELECT COUNT(*),COUNT(CASE WHEN state!='auth_failed' THEN 1 END) FROM check_results WHERE monitor_id=? AND source='authenticated' AND checked_at>=?`, m.ID, cutoff).Scan(&total, &eligible)
-		if total > 0 {
-			x := float64(eligible) / float64(total) * 100
-			v.Coverage = &x
-		}
-		latencyRows, _ := a.db.Query(`SELECT duration_ms FROM check_results WHERE monitor_id=? AND source='authenticated' AND checked_at>=? AND state='healthy' ORDER BY checked_at DESC LIMIT 1000`, m.ID, cutoff)
-		var latencies []int64
-		if latencyRows != nil {
-			for latencyRows.Next() {
-				var ms int64
-				if latencyRows.Scan(&ms) == nil {
-					latencies = append(latencies, ms)
-				}
-			}
-			latencyRows.Close()
-		}
-		if len(latencies) > 0 {
-			sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
-			p := latencies[(len(latencies)*95+99)/100-1]
-			v.P95MS = &p
-		}
-		var count int
-		_ = a.db.QueryRow(`SELECT COUNT(*) FROM incidents WHERE monitor_id=? AND resolved_at IS NULL`, m.ID).Scan(&count)
-		v.OpenIncident = count > 0
+		position[v.ID] = len(out)
 		out = append(out, v)
 	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		fail()
+		return
+	}
+	rows.Close()
+	if len(out) == 0 {
+		writeJSON(w, 200, map[string]any{"monitors": out, "generatedAt": now})
+		return
+	}
+
+	// Per-monitor rather than batched: with the (monitor_id, source, checked_at)
+	// index each of these is a contiguous index range scan, whereas ranking
+	// every row across all monitors to pick a percentile measured an order of
+	// magnitude slower. N is the monitor count, and each query is index-optimal.
+	firstChecks := make(map[int64]int64, len(out))
+	for i := range out {
+		id := out[i].ID
+
+		var firstCheck sql.NullInt64
+		if err = a.db.QueryRowContext(ctx, `SELECT MIN(checked_at) FROM check_results WHERE monitor_id=? AND source='authenticated'`, id).
+			Scan(&firstCheck); err != nil {
+			fail()
+			return
+		}
+		if firstCheck.Valid {
+			firstChecks[id] = firstCheck.Int64
+		}
+
+		// Coverage comes from the rollups for every bucket wholly inside the
+		// window, and from raw rows only for the single bucket straddling the
+		// cutoff. Reading the state of all ~43k rows per monitor was by far the
+		// dominant cost of this endpoint; the result is still exact.
+		boundary := bucketStartFor(cutoff, coverageBucketWidth)
+		var bucketTotal, bucketEligible sql.NullInt64
+		if err = a.db.QueryRowContext(ctx, `SELECT SUM(total),SUM(eligible) FROM check_rollups
+		WHERE monitor_id=? AND bucket_width=? AND bucket_start>=?`,
+			id, coverageBucketWidth, boundary+coverageBucketWidth).Scan(&bucketTotal, &bucketEligible); err != nil {
+			fail()
+			return
+		}
+		var partialTotal, partialEligible int
+		if err = a.db.QueryRowContext(ctx, `SELECT COUNT(*),COUNT(CASE WHEN state!='auth_failed' THEN 1 END)
+		FROM check_results WHERE monitor_id=? AND source='authenticated' AND checked_at>=? AND checked_at<?`,
+			id, cutoff, boundary+coverageBucketWidth).Scan(&partialTotal, &partialEligible); err != nil {
+			fail()
+			return
+		}
+		total := partialTotal + int(bucketTotal.Int64)
+		eligible := partialEligible + int(bucketEligible.Int64)
+		if total > 0 {
+			coverage := float64(eligible) / float64(total) * 100
+			out[i].Coverage = &coverage
+		}
+
+		// Nearest-rank p95 over the most recent healthy checks. The count and
+		// the value are two seeks against the same index range, rather than
+		// pulling every latency into memory to sort.
+		var healthy int
+		if err = a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (
+		 SELECT 1 FROM check_results WHERE monitor_id=? AND source='authenticated' AND checked_at>=? AND state='healthy'
+		 ORDER BY checked_at DESC LIMIT ?)`, id, cutoff, overviewLatencySamples).Scan(&healthy); err != nil {
+			fail()
+			return
+		}
+		if healthy == 0 {
+			continue
+		}
+		var p95 int64
+		if err = a.db.QueryRowContext(ctx, `SELECT duration_ms FROM (
+		 SELECT duration_ms FROM check_results WHERE monitor_id=? AND source='authenticated' AND checked_at>=? AND state='healthy'
+		 ORDER BY checked_at DESC LIMIT ?)
+		ORDER BY duration_ms LIMIT 1 OFFSET ?`, id, cutoff, overviewLatencySamples, (healthy*95+99)/100-1).Scan(&p95); err != nil {
+			fail()
+			return
+		}
+		out[i].P95MS = &p95
+	}
+
+	// Incident periods for every monitor at once, plus the open-incident flag.
+	incidentRows, err := a.db.QueryContext(ctx, `
+	SELECT monitor_id,opened_at,resolved_at FROM incidents
+	WHERE opened_at<? AND (resolved_at IS NULL OR resolved_at>?)
+	ORDER BY monitor_id,opened_at`, now, cutoff)
+	if err != nil {
+		fail()
+		return
+	}
+	periodsByMonitor := make(map[int64][]incidentPeriod)
+	for incidentRows.Next() {
+		var monitorID int64
+		var period incidentPeriod
+		var resolved sql.NullInt64
+		if err = incidentRows.Scan(&monitorID, &period.OpenedAt, &resolved); err != nil {
+			incidentRows.Close()
+			fail()
+			return
+		}
+		if resolved.Valid {
+			period.ResolvedAt = resolved.Int64
+		} else if index, known := position[monitorID]; known {
+			out[index].OpenIncident = true
+		}
+		periodsByMonitor[monitorID] = append(periodsByMonitor[monitorID], period)
+	}
+	if err = incidentRows.Err(); err != nil {
+		incidentRows.Close()
+		fail()
+		return
+	}
+	incidentRows.Close()
+
+	for i := range out {
+		firstCheck, observed := firstChecks[out[i].ID]
+		if !observed {
+			continue
+		}
+		observedStart := max(firstCheck, cutoff)
+		// Only periods overlapping the observed window contribute downtime,
+		// matching the previous per-monitor query's WHERE clause.
+		periods := make([]incidentPeriod, 0, len(periodsByMonitor[out[i].ID]))
+		for _, period := range periodsByMonitor[out[i].ID] {
+			if period.ResolvedAt == 0 || period.ResolvedAt > observedStart {
+				periods = append(periods, period)
+			}
+		}
+		out[i].Availability = confirmedAvailability(observedStart, now, periods)
+	}
+
 	writeJSON(w, 200, map[string]any{"monitors": out, "generatedAt": now})
 }
 
@@ -1248,11 +1716,6 @@ func confirmedAvailability(observedStart, now int64, periods []incidentPeriod) *
 }
 
 func (a *app) listIncidents(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.Query(`SELECT i.id,m.name,m.provider,i.opened_at,i.detected_at,i.resolved_at,i.initial_state,i.latest_state,i.summary FROM incidents i JOIN monitors m ON m.id=i.monitor_id ORDER BY i.opened_at DESC LIMIT 200`)
-	if err != nil {
-		writeJSON(w, 500, map[string]string{"error": "could not load incidents"})
-		return
-	}
 	type incidentEvent struct {
 		Type      string `json:"type"`
 		State     string `json:"state"`
@@ -1268,7 +1731,14 @@ func (a *app) listIncidents(w http.ResponseWriter, r *http.Request) {
 		Summary                   string          `json:"summary"`
 		Events                    []incidentEvent `json:"events"`
 	}
+
+	rows, err := a.db.QueryContext(r.Context(), `SELECT i.id,m.name,m.provider,i.opened_at,i.detected_at,i.resolved_at,i.initial_state,i.latest_state,i.summary FROM incidents i JOIN monitors m ON m.id=i.monitor_id ORDER BY i.opened_at DESC LIMIT 200`)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not load incidents"})
+		return
+	}
 	out := make([]incident, 0)
+	index := make(map[int64]int)
 	for rows.Next() {
 		var x incident
 		var resolved sql.NullInt64
@@ -1291,39 +1761,67 @@ func (a *app) listIncidents(w http.ResponseWriter, r *http.Request) {
 			x.Summary = incidentStateDescription(x.LatestState)
 		}
 		x.Events = make([]incidentEvent, 0)
+		index[x.ID] = len(out)
 		out = append(out, x)
 	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		writeJSON(w, 500, map[string]string{"error": "could not load incidents"})
+		return
+	}
 	rows.Close()
+	if len(out) == 0 {
+		writeJSON(w, 200, out)
+		return
+	}
+
+	// One query for every incident's events, rather than one query per
+	// incident. Ordering by incident then time lets the rows be appended
+	// straight onto the matching incident.
+	ids := make([]any, 0, len(out))
 	for i := range out {
-		eventRows, queryErr := a.db.Query(`SELECT e.type,e.new_state,e.created_at,c.http_status,c.error_code FROM incident_events e LEFT JOIN check_results c ON c.id=e.check_id WHERE e.incident_id=? ORDER BY e.created_at ASC,e.id ASC`, out[i].ID)
-		if queryErr != nil {
+		ids = append(ids, out[i].ID)
+	}
+	query := `SELECT e.incident_id,e.type,e.new_state,e.created_at,c.http_status,c.error_code
+	FROM incident_events e LEFT JOIN check_results c ON c.id=e.check_id
+	WHERE e.incident_id IN (?` + strings.Repeat(",?", len(ids)-1) + `)
+	ORDER BY e.incident_id,e.created_at ASC,e.id ASC`
+	eventRows, err := a.db.QueryContext(r.Context(), query, ids...)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not load incident log"})
+		return
+	}
+	defer eventRows.Close()
+	for eventRows.Next() {
+		var incidentID int64
+		var event incidentEvent
+		var httpStatus sql.NullInt64
+		var errorCode sql.NullString
+		if err = eventRows.Scan(&incidentID, &event.Type, &event.State, &event.CreatedAt, &httpStatus, &errorCode); err != nil {
 			writeJSON(w, 500, map[string]string{"error": "could not load incident log"})
 			return
 		}
-		for eventRows.Next() {
-			var event incidentEvent
-			var httpStatus sql.NullInt64
-			var errorCode sql.NullString
-			if queryErr = eventRows.Scan(&event.Type, &event.State, &event.CreatedAt, &httpStatus, &errorCode); queryErr != nil {
-				eventRows.Close()
-				writeJSON(w, 500, map[string]string{"error": "could not load incident log"})
-				return
-			}
-			if event.Type == "recovered" {
-				event.Summary = "Authenticated checks recovered and the incident was resolved."
-			} else {
-				result := checkResult{State: event.State}
-				if httpStatus.Valid {
-					result.HTTPStatus = int(httpStatus.Int64)
-				}
-				if errorCode.Valid {
-					result.ErrorCode = errorCode.String
-				}
-				event.Summary = incidentSummary(result)
-			}
-			out[i].Events = append(out[i].Events, event)
+		position, known := index[incidentID]
+		if !known {
+			continue
 		}
-		eventRows.Close()
+		if event.Type == "recovered" {
+			event.Summary = "Authenticated checks recovered and the incident was resolved."
+		} else {
+			result := checkResult{State: event.State}
+			if httpStatus.Valid {
+				result.HTTPStatus = int(httpStatus.Int64)
+			}
+			if errorCode.Valid {
+				result.ErrorCode = errorCode.String
+			}
+			event.Summary = incidentSummary(result)
+		}
+		out[position].Events = append(out[position].Events, event)
+	}
+	if err = eventRows.Err(); err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not load incident log"})
+		return
 	}
 	writeJSON(w, 200, out)
 }
@@ -1430,12 +1928,16 @@ func (a *app) enqueueNotification(incidentID int64, eventType, name, previous, n
 		_, _ = a.db.Exec(`INSERT INTO notification_outbox(channel_id,incident_id,event_type,payload,next_attempt_at) VALUES(?,?,?,?,?)`, channelID, incidentID, eventType, string(payload), time.Now().Unix())
 	}
 }
-func (a *app) notificationWorker() {
+func (a *app) notificationWorker(ctx context.Context) {
 	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
 	for {
 		a.deliverNotifications()
-		<-t.C
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
 	}
 }
 func (a *app) deliverNotifications() {
@@ -1527,12 +2029,6 @@ func normalizeNtfyURL(raw string) (string, error) {
 	}
 	parsed.Fragment = ""
 	return parsed.String(), nil
-}
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 func safeErr(err error) string {
 	if err == nil {

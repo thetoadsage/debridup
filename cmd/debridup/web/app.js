@@ -73,16 +73,34 @@ async function api(path, options = {}) {
   return body;
 }
 
+let renderedCardSignature = null;
+
 function renderMonitorSettings(monitors) {
   const items = Array.isArray(monitors) ? monitors : [];
   monitorConfigs = new Map(items.map(monitor => [monitor.id, monitor]));
+
+  // Skip the rewrite when nothing visible changed, and restore focus when it
+  // does, so the refresh cycle cannot silently drop a focused Edit button.
+  const signature = `${timeZonePicker.timeZone}|${JSON.stringify(items)}`;
+  if (signature === renderedCardSignature) return;
+  const focusedID = document.activeElement?.closest?.('.edit-monitor')?.dataset?.monitorId ?? null;
+
   $('#cards').innerHTML = items.length ? items.map(monitor => {
     const state = stateClass(monitor.state);
     const providerName = providerDetails[monitor.provider]?.name || monitor.provider;
     return `<article class="card"><div class="section-title"><div><p class="provider-name">${escapeHTML(monitor.name)}</p><span class="provider">${escapeHTML(providerName)}</span></div><div class="card-status"><span class="state ${state}">${escapeHTML(formatState(monitor.state))}</span><button type="button" class="quiet edit-monitor" data-monitor-id="${Number(monitor.id) || 0}">Edit settings</button></div></div><div class="metric-grid"><div class="metric"><strong>${Number(monitor.intervalSeconds) || 0}s</strong><span>Check interval</span></div><div class="metric"><strong>${Number(monitor.timeoutSeconds) || 0}s</strong><span>Timeout</span></div><div class="metric"><strong>${Number(monitor.failureThreshold) || 0}</strong><span>Failure confirmations</span></div><div class="metric"><strong>${escapeHTML(formatTimestamp(monitor.lastCheck, timeZonePicker.timeZone))}</strong><span>Last check</span></div></div></article>`;
   }).join('') : '<article class="card"><p>No providers configured. Add a provider to begin monitoring.</p></article>';
-  document.querySelectorAll('.edit-monitor').forEach(button => button.addEventListener('click', () => openEditMonitor(monitorConfigs.get(Number(button.dataset.monitorId)))));
+  renderedCardSignature = signature;
+  if (focusedID !== null) {
+    $(`.edit-monitor[data-monitor-id="${focusedID}"]`)?.focus?.();
+  }
 }
+
+// Delegated once, rather than rebinding a listener per card on every render.
+$('#cards').addEventListener('click', event => {
+  const button = event.target?.closest?.('.edit-monitor');
+  if (button) openEditMonitor(monitorConfigs.get(Number(button.dataset.monitorId)));
+});
 
 async function loadMonitorSettings() {
   renderMonitorSettings(await api('/api/monitors'));
@@ -144,10 +162,20 @@ function openEditMonitor(config) {
 
 function showManagementError(error) {
   console.error(error);
+  renderedCardSignature = null;
   $('#cards').innerHTML = '<article class="card"><p class="error">Unable to load provider settings. Refresh the page to retry.</p></article>';
 }
 
-dashboard = startDashboard({api, document, window, timeZone: timeZonePicker.timeZone});
+dashboard = startDashboard({
+  api,
+  document,
+  window,
+  timeZone: timeZonePicker.timeZone,
+  onRefresh: () => {
+    if ($('#monitor-dialog').open) return;
+    void loadMonitorSettings().catch(showManagementError);
+  },
+});
 
 $('#logout').addEventListener('click', async () => {
   await fetch('/logout', {method: 'POST'});

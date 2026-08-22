@@ -1,5 +1,7 @@
 data/
 bin/
+/debridup
+/debridup.exe
 .env
 *.db
 *.db-shm

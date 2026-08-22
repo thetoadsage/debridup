@@ -69,9 +69,25 @@ export function setupSectionNavigation({document, window} = {}) {
     else sync();
   }
 
+  // sync() reads getBoundingClientRect() for every section, which forces
+  // layout. Coalesce bursts of scroll events into one read per frame.
+  let frame = null;
+  function scheduleSync() {
+    if (frame !== null) return;
+    const request = window?.requestAnimationFrame;
+    if (typeof request !== 'function') {
+      sync();
+      return;
+    }
+    frame = request.call(window, () => {
+      frame = null;
+      sync();
+    });
+  }
+
   for (const {link} of sections) link.addEventListener?.('click', followLink);
-  window?.addEventListener?.('scroll', sync, {passive: true});
-  window?.addEventListener?.('resize', sync);
+  window?.addEventListener?.('scroll', scheduleSync, {passive: true});
+  window?.addEventListener?.('resize', scheduleSync);
   window?.addEventListener?.('hashchange', followHash);
   followHash();
 
@@ -79,9 +95,11 @@ export function setupSectionNavigation({document, window} = {}) {
     sync,
     stop() {
       for (const {link} of sections) link.removeEventListener?.('click', followLink);
-      window?.removeEventListener?.('scroll', sync);
-      window?.removeEventListener?.('resize', sync);
+      window?.removeEventListener?.('scroll', scheduleSync);
+      window?.removeEventListener?.('resize', scheduleSync);
       window?.removeEventListener?.('hashchange', followHash);
+      if (frame !== null) window?.cancelAnimationFrame?.(frame);
+      frame = null;
     },
   };
 }

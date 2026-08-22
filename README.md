@@ -35,7 +35,7 @@ Compose keeps `/data` writable while mounting only the encryption-key file read-
 
 ## Dashboard
 
-The dashboard starts at 24 hours and supports coordinated `24h`, `7d`, and `30d` ranges. Each range is returned by one authenticated `/api/dashboard` request and updates the summary, provider pulse, provider table, latency comparison, and incidents together. Server-side buckets keep each provider series bounded:
+The dashboard starts at 24 hours and supports coordinated `24h`, `7d`, and `30d` ranges. Each range is returned by one authenticated `/api/dashboard` request and updates the summary, provider pulse, provider table, latency comparison, and incidents together. Buckets are pre-aggregated as checks are recorded and stored in `check_rollups`, so a refresh reads at most one summarised row per provider per bucket instead of re-reducing the raw check history. Bucket boundaries are anchored to the epoch, so a bucket holds the same checks between refreshes rather than shifting:
 
 | Range | Bucket width | Maximum points per provider |
 | --- | ---: | ---: |
@@ -43,7 +43,11 @@ The dashboard starts at 24 hours and supports coordinated `24h`, `7d`, and `30d`
 | 7 days | 2 hours | 84 |
 | 30 days | 8 hours | 90 |
 
-Availability is the percentage of completed authenticated checks that succeeded in the selected range. p50 is the nearest-rank median latency and p95 is the nearest-rank 95th-percentile latency across those completed samples. In the provider pulse, healthy means every completed check in the bucket succeeded, degraded means the bucket contains both successes and failures, outage means every completed check failed, and unknown means no completed check exists; unknown buckets are not counted as downtime.
+Availability is the percentage of completed authenticated checks that succeeded in the selected range, and is exact. The slowest check shown for a provider is exact. Per-bucket p50 and p95 are exact nearest-rank values over the completed checks in that bucket.
+
+The p50 and p95 shown for a provider across the whole range are summary figures derived from those per-bucket percentiles, weighted by how many checks each bucket holds. An exact nearest-rank value over the whole range would require ordering every raw latency in the window on each refresh, which measured slower than the pre-aggregation it replaced; the derived figure stays close to it (within 6% on the project's test data, and asserted to stay within 15%). Per-bucket percentiles, availability, and the slowest check are unaffected.
+
+In the provider pulse, healthy means every completed check in the bucket succeeded, degraded means the bucket contains both successes and failures, outage means every completed check failed, and unknown means no completed check exists; unknown buckets are not counted as downtime.
 
 The dashboard refreshes every 30 seconds while its tab is visible, pauses while hidden, and refreshes immediately when the tab becomes visible again. A response more than 90 seconds old is labeled stale. If a later refresh fails, the last successful data remains visible with its age and a retry action; an initial failure shows an explicit unavailable state.
 
@@ -56,6 +60,10 @@ Database migrations are versioned and applied transactionally at startup. Raw au
 Only one check can run for a provider monitor at a time. A scheduled check that overlaps its previous run is skipped until the next interval, and a global worker limit bounds checks across all monitors. `DEBRIDUP_MAX_CONCURRENT_CHECKS` defaults to `4` and accepts values from `1` through `32`.
 
 `GET /healthz` is a liveness check: it reports whether the HTTP process is running. `GET /readyz` also performs a bounded database query and reports whether the application is ready to serve database-backed requests. Container health checks use `/readyz`.
+
+On `SIGTERM` or `SIGINT` the server stops accepting connections, lets in-flight requests finish, and shuts the scheduler and notification workers down before exiting. Startup problems are reported as a logged message and a non-zero exit rather than a stack trace.
+
+API responses are never cached. The embedded stylesheets and modules are served with an `ETag` derived from the asset bundle and revalidate against it, so a browser refetches them only after an upgrade. Text responses are gzip-encoded for clients that accept it.
 
 ## Unraid
 
@@ -70,7 +78,10 @@ Use the [Unraid guide](unraid/README.md) for the short key-generation and templa
 - The container entrypoint opens the root-owned, read-only Docker secret, then drops privileges before starting the application.
 - Secrets are write-only in the API and are never sent to the browser.
 - The app is single-admin; its initial password is supplied through `DEBRIDUP_ADMIN_PASSWORD` and stored as an Argon2id hash.
-- SQLite runs in WAL mode. Back up using SQLite's online backup mechanism, not by copying only the database file while the app is live.
+- Sessions are server-side records. Signing out revokes the session rather than only clearing the cookie, and sessions survive a restart until they expire after 24 hours.
+- `POST /login` bounds how many Argon2id verifications run at once and locks a client out after repeated failures, so unauthenticated requests cannot exhaust memory. Client identity comes from the connection's remote address, so run DebridUp behind a trusted reverse proxy.
+- Responses carry a strict `Content-Security-Policy`; every script, style, and asset is same-origin and embedded.
+- SQLite runs in WAL mode with `synchronous=NORMAL`. Back up using SQLite's online backup mechanism, not by copying only the database file while the app is live.
 
 ## Verification and release safety
 

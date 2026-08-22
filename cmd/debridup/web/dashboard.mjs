@@ -85,7 +85,34 @@ function setLatencyAccessibility(element, label) {
   element.setAttribute('aria-label', label);
 }
 
-export function startDashboard({api, document, window, timeZone} = {}) {
+// A full innerHTML swap destroys whatever had focus. Describe the focused
+// element by its stable data attributes so it can be found again afterwards.
+function focusSelector(element) {
+  if (!element || !element.closest) return null;
+  const bucket = element.closest('.pulse-bucket[data-provider-id][data-bucket-index]');
+  if (bucket) {
+    return `.pulse-bucket[data-provider-id="${bucket.dataset.providerId}"][data-bucket-index="${bucket.dataset.bucketIndex}"]`;
+  }
+  const providerTrigger = element.closest('.provider-detail-trigger[data-provider-id]');
+  if (providerTrigger) {
+    return `.provider-detail-trigger[data-provider-id="${providerTrigger.dataset.providerId}"]`;
+  }
+  return null;
+}
+
+// The rendered regions are driven entirely by the payload and the display time
+// zone, so an unchanged pair means the DOM would be rewritten identically.
+function renderSignature(payload, timeZone) {
+  if (!payload) return null;
+  try {
+    const {generatedAt, ...rest} = payload;
+    return `${timeZone}|${JSON.stringify(rest)}`;
+  } catch {
+    return null;
+  }
+}
+
+export function startDashboard({api, document, window, timeZone, onRefresh} = {}) {
   if (typeof api !== 'function') throw new Error('dashboard api function is required');
   if (!document || !window) throw new Error('dashboard document and window are required');
 
@@ -107,6 +134,7 @@ export function startDashboard({api, document, window, timeZone} = {}) {
   let stopped = false;
   let lastPayload = null;
   let model = null;
+  let renderedSignature = null;
   let displayTimeZone = timeZone;
 
   function now() {
@@ -135,8 +163,18 @@ export function startDashboard({api, document, window, timeZone} = {}) {
     }
   }
 
-  function renderModel(nextModel) {
+  function renderModel(nextModel, {signature = null} = {}) {
     model = nextModel;
+    // Values the drawer shows include elapsed durations, so refresh it even
+    // when the payload itself is unchanged.
+    drawer?.refresh(model.providers);
+    if (signature !== null && signature === renderedSignature) return;
+
+    const active = document.activeElement;
+    const restoreTo = focusSelector(active);
+    const restoreBucketRow = restoreTo?.startsWith('.pulse-bucket') ? active?.closest?.('.pulse-track') : null;
+    const restoreScroll = restoreBucketRow?.scrollLeft ?? 0;
+
     renderSummary(summary, model);
     if (pulse) pulse.innerHTML = renderPulse(model.providers, displayTimeZone);
     renderProviderTable(providerTable, model.providers);
@@ -147,6 +185,17 @@ export function startDashboard({api, document, window, timeZone} = {}) {
     renderIncidents(incidents, model.incidents);
     renderAvailabilityComparison(comparison, model.providers);
     setBusy(busyElements, false);
+    renderedSignature = signature;
+
+    if (restoreTo) {
+      const replacement = document.querySelector(restoreTo);
+      if (replacement) {
+        if (replacement.closest?.('.pulse-track')) setRovingTarget(replacement);
+        replacement.focus?.();
+        const track = replacement.closest?.('.pulse-track');
+        if (track && restoreScroll) track.scrollLeft = restoreScroll;
+      }
+    }
   }
 
   function renderSuccessStatus() {
@@ -169,7 +218,9 @@ export function startDashboard({api, document, window, timeZone} = {}) {
         range = lastPayload.range;
         updateRangeButtons();
       }
-      renderModel(createDashboardModel(lastPayload, now(), displayTimeZone));
+      renderModel(createDashboardModel(lastPayload, now(), displayTimeZone), {
+        signature: renderSignature(lastPayload, displayTimeZone),
+      });
       status.innerHTML = `Unable to refresh. Showing data from ${escapeHTML(model.ageLabel)} ago. <button class="status-retry" type="button" data-dashboard-retry>Retry</button>`;
     } else {
       if (summary) summary.innerHTML = '<h2 id="summary-heading" class="sr-only">Current status summary</h2><article class="summary-card"><span class="summary-label">Overall status</span><strong class="summary-value summary-state unknown">Unavailable</strong></article><article class="summary-card"><span class="summary-label">Providers online</span><strong class="summary-value">—</strong></article><article class="summary-card"><span class="summary-label">Active incidents</span><strong class="summary-value">—</strong></article><article class="summary-card"><span class="summary-label">Checks completed today</span><strong class="summary-value">—</strong></article>';
@@ -182,6 +233,7 @@ export function startDashboard({api, document, window, timeZone} = {}) {
       if (incidents) incidents.innerHTML = '<div class="dashboard-empty"><p>Dashboard data is unavailable.</p></div>';
       if (comparison) comparison.innerHTML = '<p class="muted">Dashboard data is unavailable.</p>';
       setBusy(busyElements, false);
+      renderedSignature = null;
       status.innerHTML = 'Dashboard data is unavailable. <button class="status-retry" type="button" data-dashboard-retry>Retry</button>';
     }
   }
@@ -215,8 +267,15 @@ export function startDashboard({api, document, window, timeZone} = {}) {
           range = lastPayload.range;
           updateRangeButtons();
         }
-        renderModel(createDashboardModel(lastPayload, now(), displayTimeZone));
+        renderModel(createDashboardModel(lastPayload, now(), displayTimeZone), {
+          signature: renderSignature(lastPayload, displayTimeZone),
+        });
         renderSuccessStatus();
+        try {
+          onRefresh?.(model);
+        } catch {
+          // A dependent panel must never break the dashboard refresh loop.
+        }
         return model;
       })
       .catch(error => {
@@ -251,6 +310,45 @@ export function startDashboard({api, document, window, timeZone} = {}) {
     if (event.target?.closest?.('[data-dashboard-retry]')) void refresh({supersede: true});
   }
 
+  // Roving tabindex bookkeeping: exactly one bucket per row stays tabbable.
+  function setRovingTarget(bucket) {
+    const track = bucket?.closest?.('.pulse-track');
+    if (!track) return;
+    for (const sibling of track.querySelectorAll('.pulse-bucket')) {
+      sibling.setAttribute('tabindex', sibling === bucket ? '0' : '-1');
+    }
+  }
+
+  function pulseKeydown(event) {
+    const current = event.target?.closest?.('.pulse-bucket');
+    if (!current) return;
+    const track = current.closest('.pulse-track');
+    if (!track) return;
+    const buckets = Array.from(track.querySelectorAll('.pulse-bucket'));
+    const index = buckets.indexOf(current);
+    if (index === -1) return;
+    let next = null;
+    switch (event.key) {
+      case 'ArrowRight': next = buckets[Math.min(index + 1, buckets.length - 1)]; break;
+      case 'ArrowLeft': next = buckets[Math.max(index - 1, 0)]; break;
+      case 'Home': next = buckets[0]; break;
+      case 'End': next = buckets[buckets.length - 1]; break;
+      default: return;
+    }
+    if (!next || next === current) {
+      event.preventDefault();
+      return;
+    }
+    event.preventDefault();
+    setRovingTarget(next);
+    next.focus();
+  }
+
+  function pulseFocusIn(event) {
+    const bucket = event.target?.closest?.('.pulse-bucket');
+    if (bucket) setRovingTarget(bucket);
+  }
+
   function openProvider(event) {
     const trigger = event.target?.closest?.('[data-provider-id]');
     if (!trigger || !model || !drawer) return;
@@ -269,7 +367,9 @@ export function startDashboard({api, document, window, timeZone} = {}) {
   function setTimeZone(value) {
     displayTimeZone = value;
     if (!lastPayload) return;
-    renderModel(createDashboardModel(lastPayload, now(), displayTimeZone));
+    renderModel(createDashboardModel(lastPayload, now(), displayTimeZone), {
+      signature: renderSignature(lastPayload, displayTimeZone),
+    });
     renderSuccessStatus();
   }
 
@@ -278,6 +378,8 @@ export function startDashboard({api, document, window, timeZone} = {}) {
   refreshButton?.addEventListener('click', manualRefresh);
   status?.addEventListener('click', retryRefresh);
   pulse?.addEventListener('click', openProvider);
+  pulse?.addEventListener('keydown', pulseKeydown);
+  pulse?.addEventListener('focusin', pulseFocusIn);
   providerTable?.addEventListener('click', openProvider);
   document.addEventListener('visibilitychange', visibilityChanged);
   const ready = refresh();
@@ -291,6 +393,8 @@ export function startDashboard({api, document, window, timeZone} = {}) {
     refreshButton?.removeEventListener('click', manualRefresh);
     status?.removeEventListener('click', retryRefresh);
     pulse?.removeEventListener('click', openProvider);
+    pulse?.removeEventListener('keydown', pulseKeydown);
+    pulse?.removeEventListener('focusin', pulseFocusIn);
     providerTable?.removeEventListener('click', openProvider);
     document.removeEventListener('visibilitychange', visibilityChanged);
     drawer?.destroy();

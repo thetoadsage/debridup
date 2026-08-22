@@ -19,14 +19,6 @@ type dashboardRange struct {
 	MaxPoints int           `json:"maxPoints"`
 }
 
-type dashboardSample struct {
-	Source     string    `json:"source"`
-	State      string    `json:"state"`
-	DurationMS int64     `json:"durationMs"`
-	ErrorCode  string    `json:"-"`
-	CheckedAt  time.Time `json:"checkedAt"`
-}
-
 type dashboardResponse struct {
 	GeneratedAt int64               `json:"generatedAt"`
 	Range       string              `json:"range"`
@@ -106,26 +98,25 @@ func nearestRank(values []int64, percentile float64) *int64 {
 	return &ordered[index]
 }
 
-func pulseState(samples []dashboardSample) string {
-	if len(samples) == 0 {
-		return "unknown"
+// dashboardWindow returns the bucket-aligned window for a range. Buckets are
+// anchored to the epoch so their contents are stable between refreshes, which
+// is what makes them storable. The window is exactly MaxPoints buckets ending
+// with the one currently being filled.
+func dashboardWindow(spec dashboardRange, now time.Time) (firstBucket, lastBucket, width int64) {
+	width = int64(spec.Bucket / time.Second)
+	if width <= 0 || spec.MaxPoints <= 0 {
+		return 0, 0, width
 	}
-	healthy := 0
-	for _, sample := range samples {
-		if sample.State == stateHealthy {
-			healthy++
-		}
-	}
-	switch {
-	case healthy == len(samples):
-		return "healthy"
-	case healthy == 0:
-		return "outage"
-	default:
-		return "degraded"
-	}
+	// now-1 rather than now: on an exact bucket boundary the bucket starting at
+	// now holds no checks yet, so the window would waste a slot and emit a
+	// bucket start equal to the snapshot time.
+	lastBucket = bucketStartFor(now.Unix()-1, width)
+	firstBucket = lastBucket - int64(spec.MaxPoints-1)*width
+	return firstBucket, lastBucket, width
 }
 
+// dashboardDisplayState shows a provider whose latest raw check failed as
+// degraded, even before the failure threshold confirms a state change.
 func dashboardDisplayState(current, lastRaw string) string {
 	if current == stateHealthy && lastRaw != "" && lastRaw != stateHealthy {
 		return stateDegraded
@@ -133,64 +124,28 @@ func dashboardDisplayState(current, lastRaw string) string {
 	return current
 }
 
-func transientDegradationSummary(sample dashboardSample, timeoutSeconds int) string {
-	duration := fmt.Sprintf("%.1fs", float64(sample.DurationMS)/1000)
+func transientDegradationSummary(durationMS int64, timeoutSeconds int) string {
+	duration := fmt.Sprintf("%.1fs", float64(durationMS)/1000)
 	if timeoutSeconds > 0 {
 		return fmt.Sprintf("Authenticated check took %s and exceeded the %ds timeout. Possible degraded service; no notification was sent because the failure threshold has not been reached.", duration, timeoutSeconds)
 	}
 	return fmt.Sprintf("Authenticated check timed out after %s. Possible degraded service; no notification was sent because the failure threshold has not been reached.", duration)
 }
 
-func aggregateSeries(samples []dashboardSample, spec dashboardRange, start, end time.Time) []dashboardPoint {
-	if spec.Bucket <= 0 || spec.MaxPoints <= 0 || !end.After(start) {
-		return []dashboardPoint{}
-	}
-	bucketCount := int((end.Sub(start) + spec.Bucket - 1) / spec.Bucket)
-	if bucketCount > spec.MaxPoints {
-		bucketCount = spec.MaxPoints
-	}
-	buckets := make([][]dashboardSample, bucketCount)
-	for _, sample := range samples {
-		if sample.Source != "authenticated" || sample.CheckedAt.Before(start) || !sample.CheckedAt.Before(end) {
-			continue
-		}
-		index := int(sample.CheckedAt.Sub(start) / spec.Bucket)
-		if index >= 0 && index < bucketCount {
-			buckets[index] = append(buckets[index], sample)
-		}
-	}
-
-	points := make([]dashboardPoint, 0, bucketCount)
-	for index, bucket := range buckets {
-		point := dashboardPoint{
-			BucketStart: start.Add(time.Duration(index) * spec.Bucket).Unix(),
-			State:       pulseState(bucket),
-		}
-		if len(bucket) == 0 {
-			points = append(points, point)
-			continue
-		}
-
-		healthy := 0
-		latencies := make([]int64, 0, len(bucket))
-		for _, sample := range bucket {
-			if sample.State == stateHealthy {
-				healthy++
-			}
-			latencies = append(latencies, sample.DurationMS)
-		}
-		availability := float64(healthy) / float64(len(bucket)) * 100
-		point.Availability = &availability
-		point.P50MS = nearestRank(latencies, .50)
-		point.P95MS = nearestRank(latencies, .95)
-		points = append(points, point)
-	}
-	return points
+// rollupPoint is one stored bucket.
+type rollupPoint struct {
+	BucketStart int64
+	Total       int64
+	Healthy     int64
+	SlowestMS   int64
+	P50MS       *int64
+	P95MS       *int64
 }
 
 func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now time.Time) (dashboardResponse, error) {
 	now = now.UTC()
-	start := now.Add(-spec.Window)
+	firstBucket, lastBucket, width := dashboardWindow(spec, now)
+	windowStart := time.Unix(firstBucket, 0).UTC()
 	response := dashboardResponse{
 		GeneratedAt: now.Unix(),
 		Range:       dashboardRangeLabel(spec),
@@ -207,13 +162,28 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 		lastRawState   string
 		failureStarted *int64
 		timeoutSeconds int
+		// The most recent authenticated check in the window, used to surface a
+		// transient timeout that has not yet crossed the failure threshold.
+		// The rollups summarise buckets, so the individual latest check is
+		// fetched alongside the provider row rather than from a sample slice.
+		latestErrorCode  string
+		latestDurationMS int64
+		latestCheckedAt  int64
 	}
 	providers := make([]providerState, 0)
-	samplesByMonitor := make(map[int64][]dashboardSample)
+	rollupsByMonitor := make(map[int64][]rollupPoint)
 	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	err := a.withReadOnlyDashboardTransaction(ctx, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `SELECT m.id,m.name,m.provider,m.enabled,m.timeout_seconds,s.current_state,s.state_since,s.last_raw_state,s.failure_started_at,s.last_check_at
-		FROM monitors m LEFT JOIN monitor_states s ON s.monitor_id=m.id ORDER BY m.id`)
+		rows, err := tx.QueryContext(ctx, `SELECT m.id,m.name,m.provider,m.enabled,m.timeout_seconds,
+		s.current_state,s.state_since,s.last_raw_state,s.failure_started_at,s.last_check_at,
+		COALESCE(l.error_code,''),COALESCE(l.duration_ms,0),COALESCE(l.checked_at,0)
+		FROM monitors m
+		LEFT JOIN monitor_states s ON s.monitor_id=m.id
+		LEFT JOIN check_results l ON l.id = (
+		  SELECT id FROM check_results
+		  WHERE monitor_id=m.id AND source='authenticated' AND checked_at>=? AND checked_at<?
+		  ORDER BY checked_at DESC, id DESC LIMIT 1)
+		ORDER BY m.id`, firstBucket, now.Unix())
 		if err != nil {
 			return fmt.Errorf("load dashboard providers: %w", err)
 		}
@@ -221,7 +191,9 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 			var currentState, lastRawState sql.NullString
 			var stateSince, failureStarted, lastCheck sql.NullInt64
 			var provider providerState
-			if err := rows.Scan(&provider.provider.ID, &provider.provider.Name, &provider.provider.Provider, &provider.enabled, &provider.timeoutSeconds, &currentState, &stateSince, &lastRawState, &failureStarted, &lastCheck); err != nil {
+			if err := rows.Scan(&provider.provider.ID, &provider.provider.Name, &provider.provider.Provider, &provider.enabled, &provider.timeoutSeconds,
+				&currentState, &stateSince, &lastRawState, &failureStarted, &lastCheck,
+				&provider.latestErrorCode, &provider.latestDurationMS, &provider.latestCheckedAt); err != nil {
 				rows.Close()
 				return fmt.Errorf("scan dashboard provider: %w", err)
 			}
@@ -250,38 +222,36 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 			return fmt.Errorf("close dashboard providers: %w", err)
 		}
 
-		rows, err = tx.QueryContext(ctx, `SELECT monitor_id,source,state,duration_ms,COALESCE(error_code,''),checked_at
-		FROM check_results WHERE source='authenticated' AND checked_at>=? AND checked_at<?
-		ORDER BY monitor_id,checked_at,id`, start.Unix(), now.Unix())
+		// Pre-aggregated buckets: at most MaxPoints rows per provider, rather
+		// than every raw check in the window.
+		rows, err = tx.QueryContext(ctx, `SELECT monitor_id,bucket_start,total,healthy,slowest_ms,p50_ms,p95_ms
+		FROM check_rollups WHERE bucket_width=? AND bucket_start>=? AND bucket_start<=?
+		ORDER BY monitor_id,bucket_start`, width, firstBucket, lastBucket)
 		if err != nil {
-			return fmt.Errorf("load dashboard checks: %w", err)
+			return fmt.Errorf("load dashboard rollups: %w", err)
 		}
 		for rows.Next() {
-			var monitorID, checkedAt int64
-			var sample dashboardSample
-			if err := rows.Scan(&monitorID, &sample.Source, &sample.State, &sample.DurationMS, &sample.ErrorCode, &checkedAt); err != nil {
+			var monitorID int64
+			var point rollupPoint
+			if err := rows.Scan(&monitorID, &point.BucketStart, &point.Total, &point.Healthy, &point.SlowestMS, &point.P50MS, &point.P95MS); err != nil {
 				rows.Close()
-				return fmt.Errorf("scan dashboard check: %w", err)
+				return fmt.Errorf("scan dashboard rollup: %w", err)
 			}
-			sample.CheckedAt = time.Unix(checkedAt, 0).UTC()
-			samplesByMonitor[monitorID] = append(samplesByMonitor[monitorID], sample)
-			if !sample.CheckedAt.Before(midnight) {
-				response.Summary.ChecksToday++
-			}
+			rollupsByMonitor[monitorID] = append(rollupsByMonitor[monitorID], point)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
-			return fmt.Errorf("iterate dashboard checks: %w", err)
+			return fmt.Errorf("iterate dashboard rollups: %w", err)
 		}
 		if err := rows.Close(); err != nil {
-			return fmt.Errorf("close dashboard checks: %w", err)
+			return fmt.Errorf("close dashboard rollups: %w", err)
 		}
 
 		rows, err = tx.QueryContext(ctx, `SELECT i.id,i.monitor_id,m.name,m.provider,i.opened_at,i.detected_at,i.resolved_at,
 		i.initial_state,i.latest_state,COALESCE(i.summary,'')
 		FROM incidents i JOIN monitors m ON m.id=i.monitor_id
 		WHERE i.opened_at<? AND (i.resolved_at IS NULL OR i.resolved_at>?)
-		ORDER BY i.opened_at DESC,i.id DESC`, now.Unix(), start.Unix())
+		ORDER BY i.opened_at DESC,i.id DESC`, now.Unix(), windowStart.Unix())
 		if err != nil {
 			return fmt.Errorf("load dashboard incidents: %w", err)
 		}
@@ -317,42 +287,41 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 		if provider.provider.State == stateDegraded && provider.failureStarted != nil {
 			provider.provider.StateSince = provider.failureStarted
 		}
-		samples := samplesByMonitor[provider.provider.ID]
-		provider.provider.Series = aggregateSeries(samples, spec, start, now)
-		if len(samples) > 0 {
-			latencies := make([]int64, 0, len(samples))
-			healthy := 0
-			var slowest int64
-			for _, sample := range samples {
-				if sample.State == stateHealthy {
-					healthy++
-				}
-				latencies = append(latencies, sample.DurationMS)
-				if sample.DurationMS > slowest {
-					slowest = sample.DurationMS
-				}
+		points := rollupsByMonitor[provider.provider.ID]
+		provider.provider.Series = seriesFromRollups(points, firstBucket, lastBucket, width, spec.MaxPoints)
+
+		var total, healthy, slowest int64
+		for _, point := range points {
+			total += point.Total
+			healthy += point.Healthy
+			if point.SlowestMS > slowest {
+				slowest = point.SlowestMS
 			}
-			availability := float64(healthy) / float64(len(samples)) * 100
-			provider.provider.Availability = &availability
-			provider.provider.P50MS = nearestRank(latencies, .50)
-			provider.provider.P95MS = nearestRank(latencies, .95)
-			provider.provider.SlowestMS = int64Pointer(slowest)
+			// Midnight is a boundary for every bucket width in use, so buckets
+			// at or after it tile today exactly.
+			if point.BucketStart >= midnight.Unix() {
+				response.Summary.ChecksToday += int(point.Total)
+			}
 		}
-		if provider.provider.State == stateDegraded && len(samples) > 0 {
-			latest := samples[len(samples)-1]
-			if latest.ErrorCode == "timeout" {
-				response.Incidents = append(response.Incidents, dashboardIncident{
-					ID:          -provider.provider.ID,
-					MonitorID:   provider.provider.ID,
-					Name:        provider.provider.Name,
-					Provider:    provider.provider.Provider,
-					OpenedAt:    latest.CheckedAt.Unix(),
-					DetectedAt:  latest.CheckedAt.Unix(),
-					LatestState: stateDegraded,
-					Summary:     transientDegradationSummary(latest, provider.timeoutSeconds),
-					Transient:   true,
-				})
-			}
+		if total > 0 {
+			availability := float64(healthy) / float64(total) * 100
+			provider.provider.Availability = &availability
+			provider.provider.SlowestMS = int64Pointer(slowest)
+			provider.provider.P50MS = weightedPercentile(points, .50)
+			provider.provider.P95MS = weightedPercentile(points, .95)
+		}
+		if provider.provider.State == stateDegraded && provider.latestErrorCode == "timeout" {
+			response.Incidents = append(response.Incidents, dashboardIncident{
+				ID:          -provider.provider.ID,
+				MonitorID:   provider.provider.ID,
+				Name:        provider.provider.Name,
+				Provider:    provider.provider.Provider,
+				OpenedAt:    provider.latestCheckedAt,
+				DetectedAt:  provider.latestCheckedAt,
+				LatestState: stateDegraded,
+				Summary:     transientDegradationSummary(provider.latestDurationMS, provider.timeoutSeconds),
+				Transient:   true,
+			})
 		}
 
 		if provider.enabled {
@@ -377,6 +346,81 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 		return response.Incidents[i].OpenedAt > response.Incidents[j].OpenedAt
 	})
 	return response, nil
+}
+
+// seriesFromRollups expands stored buckets into a dense series, filling gaps
+// with unknown points so a provider with no checks in a bucket still occupies
+// its slot on the timeline.
+func seriesFromRollups(points []rollupPoint, firstBucket, lastBucket, width int64, maxPoints int) []dashboardPoint {
+	if width <= 0 || maxPoints <= 0 || lastBucket < firstBucket {
+		return []dashboardPoint{}
+	}
+	stored := make(map[int64]rollupPoint, len(points))
+	for _, point := range points {
+		stored[point.BucketStart] = point
+	}
+	series := make([]dashboardPoint, 0, maxPoints)
+	for bucket := firstBucket; bucket <= lastBucket; bucket += width {
+		point := dashboardPoint{BucketStart: bucket, State: "unknown"}
+		if summary, present := stored[bucket]; present && summary.Total > 0 {
+			switch {
+			case summary.Healthy == summary.Total:
+				point.State = "healthy"
+			case summary.Healthy == 0:
+				point.State = "outage"
+			default:
+				point.State = "degraded"
+			}
+			availability := float64(summary.Healthy) / float64(summary.Total) * 100
+			point.Availability = &availability
+			point.P50MS = summary.P50MS
+			point.P95MS = summary.P95MS
+		}
+		series = append(series, point)
+	}
+	return series
+}
+
+// weightedPercentile estimates a percentile across the window from the stored
+// per-bucket percentiles, weighted by how many checks each bucket holds.
+//
+// The exact value would need every raw latency in the window, which is the work
+// the rollups exist to avoid. Buckets are small relative to the window, so this
+// tracks the true nearest-rank value closely; it is a summary figure, and the
+// per-bucket percentiles it is built from remain exact.
+func weightedPercentile(points []rollupPoint, percentile float64) *int64 {
+	type weighted struct {
+		value  int64
+		weight int64
+	}
+	samples := make([]weighted, 0, len(points))
+	var totalWeight int64
+	for _, point := range points {
+		value := point.P95MS
+		if percentile <= .5 {
+			value = point.P50MS
+		}
+		if value == nil || point.Total <= 0 {
+			continue
+		}
+		samples = append(samples, weighted{value: *value, weight: point.Total})
+		totalWeight += point.Total
+	}
+	if totalWeight == 0 {
+		return nil
+	}
+	sort.Slice(samples, func(i, j int) bool { return samples[i].value < samples[j].value })
+	target := int64(math.Ceil(percentile * float64(totalWeight)))
+	var seen int64
+	for _, sample := range samples {
+		seen += sample.weight
+		if seen >= target {
+			value := sample.value
+			return &value
+		}
+	}
+	value := samples[len(samples)-1].value
+	return &value
 }
 
 func (a *app) withReadOnlyDashboardTransaction(ctx context.Context, load func(*sql.Tx) error) (err error) {

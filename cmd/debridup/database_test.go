@@ -19,23 +19,48 @@ func TestOpenDatabaseAppliesConnectionPragmas(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	db.SetMaxOpenConns(2)
-	for i := 0; i < 2; i++ {
+	// Exercise the pool that openDatabase actually configures, rather than
+	// overriding it here and leaving the real setting untested.
+	if got := db.Stats().MaxOpenConnections; got != maxOpenConnections {
+		t.Fatalf("MaxOpenConnections = %d, want %d", got, maxOpenConnections)
+	}
+
+	connections := make([]*sql.Conn, 0, maxOpenConnections)
+	for i := 0; i < maxOpenConnections; i++ {
 		conn, err := db.Conn(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
-		var foreignKeys, busyTimeout int
+		connections = append(connections, conn)
+
+		var foreignKeys, busyTimeout, synchronous int
+		var journalMode string
 		if err := conn.QueryRowContext(context.Background(), "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
 			t.Fatal(err)
 		}
 		if err := conn.QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
 			t.Fatal(err)
 		}
-		conn.Close()
+		if err := conn.QueryRowContext(context.Background(), "PRAGMA synchronous").Scan(&synchronous); err != nil {
+			t.Fatal(err)
+		}
+		if err := conn.QueryRowContext(context.Background(), "PRAGMA journal_mode").Scan(&journalMode); err != nil {
+			t.Fatal(err)
+		}
 		if foreignKeys != 1 || busyTimeout != 5000 {
 			t.Fatalf("foreign_keys=%d busy_timeout=%d", foreignKeys, busyTimeout)
 		}
+		// 1 == NORMAL, the correct pairing with WAL.
+		if synchronous != 1 {
+			t.Fatalf("synchronous = %d, want 1 (NORMAL)", synchronous)
+		}
+		if !strings.EqualFold(journalMode, "wal") {
+			t.Fatalf("journal_mode = %q, want wal", journalMode)
+		}
+	}
+	// Held simultaneously, so each assertion above ran on a distinct connection.
+	for _, conn := range connections {
+		conn.Close()
 	}
 }
 

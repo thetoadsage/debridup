@@ -33,10 +33,15 @@ export function renderPulse(providers, timeZone) {
         `${formatPercentage(point?.availability)} availability`,
         `p95 ${formatLatency(point?.p95Ms)}`,
       ].join(', ');
-      return `<button class="pulse-bucket ${rawState}" type="button" data-provider-id="${Number(provider?.id) || 0}" data-bucket-index="${index}"><span class="pulse-symbol" aria-hidden="true">${STATE_SYMBOLS[rawState]}</span><span class="sr-only">${label}</span></button>`;
+      // Roving tabindex: the row is a single tab stop and arrow keys move
+      // between buckets, so a 90-bucket range does not add 90 tab stops.
+      return `<button class="pulse-bucket ${rawState}" type="button" tabindex="${index === 0 ? '0' : '-1'}" data-provider-id="${Number(provider?.id) || 0}" data-bucket-index="${index}"><span class="pulse-symbol" aria-hidden="true">${STATE_SYMBOLS[rawState]}</span><span class="sr-only">${label}</span></button>`;
     }).join('');
     const track = buckets || '<span class="pulse-empty">No checks in this range</span>';
-    return `<div class="pulse-row"><span class="pulse-provider">${name}</span><div class="pulse-track" style="--pulse-bucket-count:${Math.max(1, series.length)}">${track}</div></div>`;
+    const trackAttributes = buckets
+      ? ` role="toolbar" aria-orientation="horizontal" aria-label="${name}: ${series.length} status buckets, use arrow keys to review"`
+      : '';
+    return `<div class="pulse-row"><span class="pulse-provider">${name}</span><div class="pulse-track"${trackAttributes} style="--pulse-bucket-count:${Math.max(1, series.length)}">${track}</div></div>`;
   });
 
   return rows.length
