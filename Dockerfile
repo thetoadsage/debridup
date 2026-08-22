@@ -1,4 +1,4 @@
-FROM golang:1.24-alpine AS build
+FROM golang:1.25.14-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum* ./
 RUN go mod download
@@ -14,5 +14,5 @@ COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 VOLUME ["/data"]
 ENV DEBRIDUP_DATA_DIR=/data
 EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD wget -q -O /dev/null http://127.0.0.1:8080/readyz || exit 1
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint"]

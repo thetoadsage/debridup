@@ -1,10 +1,13 @@
 #!/bin/sh
 set -eu
 
-# Docker secrets are mounted root-readable. Read the secret before dropping
-# privileges so the application itself never needs to run as root.
+# Docker secrets are mounted root-readable. Open the secret before dropping
+# privileges so the application itself never needs to run as root or receive
+# encryption material through its environment or process arguments.
 if [ -n "${DEBRIDUP_ENCRYPTION_KEY_FILE:-}" ]; then
-  export DEBRIDUP_ENCRYPTION_KEY="$(cat "$DEBRIDUP_ENCRYPTION_KEY_FILE")"
+  exec 3<"$DEBRIDUP_ENCRYPTION_KEY_FILE"
+  export DEBRIDUP_ENCRYPTION_KEY_FD=3
+  unset DEBRIDUP_ENCRYPTION_KEY
   unset DEBRIDUP_ENCRYPTION_KEY_FILE
 fi
 

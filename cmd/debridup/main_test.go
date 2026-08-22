@@ -1,13 +1,391 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"database/sql"
+	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/crypto/chacha20poly1305"
 )
+
+func TestLoadKeyReadsInheritedDescriptor(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	encoded := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, chacha20poly1305.KeySize))
+	if _, err := io.WriteString(w, encoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY", "")
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FILE", "")
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FD", strconv.FormatUint(uint64(r.Fd()), 10))
+
+	got, err := loadKey()
+	_ = r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, bytes.Repeat([]byte{7}, chacha20poly1305.KeySize)) {
+		t.Fatal("wrong key")
+	}
+}
+
+func TestLoadKeyClosesInheritedDescriptor(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	encoded := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{8}, chacha20poly1305.KeySize))
+	if _, err := io.WriteString(w, encoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY", "")
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FILE", "")
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FD", strconv.FormatUint(uint64(r.Fd()), 10))
+
+	if _, err := loadKey(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Read(make([]byte, 1)); err == nil {
+		t.Fatal("descriptor remained open after key load")
+	}
+	_ = r.Close()
+}
+
+func TestLoadKeyUsesDescriptorBeforeFileAndDirectValue(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	descriptorKey := bytes.Repeat([]byte{9}, chacha20poly1305.KeySize)
+	if _, err := io.WriteString(w, base64.StdEncoding.EncodeToString(descriptorKey)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fileKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{10}, chacha20poly1305.KeySize))
+	keyFile := filepath.Join(t.TempDir(), "encryption-key")
+	if err := os.WriteFile(keyFile, []byte(fileKey), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{11}, chacha20poly1305.KeySize)))
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FILE", keyFile)
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FD", strconv.FormatUint(uint64(r.Fd()), 10))
+
+	got, err := loadKey()
+	_ = r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, descriptorKey) {
+		t.Fatal("descriptor did not take precedence")
+	}
+}
+
+func TestLoadKeyDoesNotFallBackFromInvalidDescriptor(t *testing.T) {
+	validFallback := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{13}, chacha20poly1305.KeySize))
+	keyFile := filepath.Join(t.TempDir(), "encryption-key")
+	if err := os.WriteFile(keyFile, []byte(validFallback), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY", validFallback)
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FILE", keyFile)
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FD", "invalid-descriptor")
+
+	if _, err := loadKey(); err != errInvalidEncryptionKey {
+		t.Fatalf("invalid descriptor error = %v", err)
+	}
+}
+
+func TestLoadKeyPreservesFileAndDevelopmentFallbacks(t *testing.T) {
+	fileKey := bytes.Repeat([]byte{14}, chacha20poly1305.KeySize)
+	directKey := bytes.Repeat([]byte{15}, chacha20poly1305.KeySize)
+	keyFile := filepath.Join(t.TempDir(), "encryption-key")
+	if err := os.WriteFile(keyFile, []byte(base64.StdEncoding.EncodeToString(fileKey)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FD", "")
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FILE", keyFile)
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(directKey))
+
+	got, err := loadKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, fileKey) {
+		t.Fatal("file input did not take precedence over the development fallback")
+	}
+
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FILE", "")
+	got, err = loadKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, directKey) {
+		t.Fatal("development fallback stopped working")
+	}
+}
+
+func TestLoadKeyRejectsUnsafeSourcesWithGenericErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		direct string
+		file   string
+		fd     string
+	}{
+		{name: "missing"},
+		{name: "negative descriptor", fd: "-1"},
+		{name: "malformed descriptor", fd: "not-a-descriptor"},
+		{name: "missing file", file: filepath.Join(t.TempDir(), "absent-key")},
+		{name: "invalid direct value", direct: "invalid-key-input"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DEBRIDUP_ENCRYPTION_KEY", tc.direct)
+			t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FILE", tc.file)
+			t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FD", tc.fd)
+			_, err := loadKey()
+			if err == nil {
+				t.Fatal("unsafe key source was accepted")
+			}
+			if err.Error() != "invalid encryption key" {
+				t.Fatalf("unsafe error detail: %q", err)
+			}
+		})
+	}
+}
+
+func TestLoadKeyRejectsOversizedDescriptorAndClosesIt(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	writeDone := make(chan error, 1)
+	go func() {
+		_, writeErr := w.Write(bytes.Repeat([]byte{'x'}, 4097))
+		if closeErr := w.Close(); writeErr == nil {
+			writeErr = closeErr
+		}
+		writeDone <- writeErr
+	}()
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY", "")
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FILE", "")
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FD", strconv.FormatUint(uint64(r.Fd()), 10))
+
+	_, err = loadKey()
+	if err == nil || err.Error() != "invalid encryption key" {
+		t.Fatalf("oversized descriptor error = %v", err)
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Read(make([]byte, 1)); err == nil {
+		t.Fatal("oversized descriptor remained open")
+	}
+	_ = r.Close()
+}
+
+func TestEntrypointHandsOffSecretByDescriptorOnly(t *testing.T) {
+	tempDir := t.TempDir()
+	secretPath := filepath.Join(tempDir, "encryption-key")
+	secret := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{12}, chacha20poly1305.KeySize))
+	if err := os.WriteFile(secretPath, []byte(secret), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	probePath := filepath.Join(tempDir, "entrypoint-probe")
+	fakeSuExec := filepath.Join(tempDir, "su-exec")
+	probeScript := `#!/bin/sh
+set -eu
+[ "${DEBRIDUP_ENCRYPTION_KEY+x}" != x ] || exit 70
+[ "${DEBRIDUP_ENCRYPTION_KEY_FILE+x}" != x ] || exit 71
+[ "${DEBRIDUP_ENCRYPTION_KEY_FD:-}" = 3 ] || exit 72
+{
+  printf '%s\n' "$DEBRIDUP_ENCRYPTION_KEY_FD" "$#"
+  printf '%s\n' "$@"
+  cat <&3
+} > "$ENTRYPOINT_PROBE_OUTPUT"
+`
+	if err := os.WriteFile(fakeSuExec, []byte(probeScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entrypoint := executableEntrypointForTest(t)
+	command := exec.Command("sh", entrypoint)
+	command.Env = []string{
+		"PATH=" + tempDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"PUID=99",
+		"PGID=100",
+		"DEBRIDUP_ENCRYPTION_KEY=" + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{16}, chacha20poly1305.KeySize)),
+		"DEBRIDUP_ENCRYPTION_KEY_FILE=" + secretPath,
+		"ENTRYPOINT_PROBE_OUTPUT=" + probePath,
+	}
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("entrypoint failed: %v: %s", err, output)
+	}
+
+	probe, err := os.ReadFile(probePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPrefix := "3\n2\n99:100\n/usr/local/bin/debridup\n"
+	if !bytes.Equal(probe, append([]byte(wantPrefix), []byte(secret)...)) {
+		t.Fatal("entrypoint did not preserve the descriptor-only handoff and safe process arguments")
+	}
+}
+
+func TestEntrypointFailsBeforePrivilegeDropWhenSecretFileIsMissing(t *testing.T) {
+	tempDir := t.TempDir()
+	probePath := filepath.Join(tempDir, "privilege-drop-probe")
+	fakeSuExec := filepath.Join(tempDir, "su-exec")
+	if err := os.WriteFile(fakeSuExec, []byte("#!/bin/sh\n: > \"$ENTRYPOINT_PROBE_OUTPUT\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entrypoint := executableEntrypointForTest(t)
+	command := exec.Command("sh", entrypoint)
+	command.Env = []string{
+		"PATH=" + tempDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"PUID=99",
+		"PGID=100",
+		"DEBRIDUP_ENCRYPTION_KEY_FILE=" + filepath.Join(tempDir, "absent-key"),
+		"ENTRYPOINT_PROBE_OUTPUT=" + probePath,
+	}
+	if err := command.Run(); err == nil {
+		t.Fatal("entrypoint accepted a missing secret file")
+	}
+	if _, err := os.Stat(probePath); !os.IsNotExist(err) {
+		t.Fatal("entrypoint dropped privileges before rejecting the missing secret")
+	}
+}
+
+func TestEntrypointCheckoutIsLFOnlyAndValidShell(t *testing.T) {
+	entrypoint, err := filepath.Abs(filepath.Join("..", "..", "docker-entrypoint.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entrypointBytes, err := os.ReadFile(entrypoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.ContainsRune(entrypointBytes, '\r') {
+		t.Fatal("docker-entrypoint.sh contains a carriage return")
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	shell, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("entrypoint syntax check requires a POSIX shell")
+	}
+	if output, err := exec.Command(shell, "-n", entrypoint).CombinedOutput(); err != nil {
+		t.Fatalf("docker-entrypoint.sh syntax check failed: %v: %s", err, output)
+	}
+}
+
+func TestComposeDocumentationKeepsDirectoryTraversableAndKeyRootOnly(t *testing.T) {
+	readmePath, err := filepath.Abs(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	readmeBytes, err := os.ReadFile(readmePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readme := string(readmeBytes)
+	for _, required := range []string{
+		"install -d -m 0700 secrets",
+		"sudo install -m 0400 -o root -g root /dev/stdin secrets/encryption_key",
+	} {
+		if !strings.Contains(readme, required) {
+			t.Errorf("Compose secret setup is missing %q", required)
+		}
+	}
+	if strings.Contains(readme, "chmod 600 secrets/encryption_key") {
+		t.Fatal("Compose secret setup leaves the key owned by the invoking user")
+	}
+	if strings.Contains(readme, "install -d -m 0700 -o root -g root secrets") {
+		t.Fatal("Compose secret setup makes the tracked directory inaccessible to the invoking user")
+	}
+}
+
+func TestGitIgnoresGeneratedComposeSecretsButTracksPlaceholder(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitExecutable := "git"
+	gitPrefix := []string{"-c", "safe.directory=" + filepath.ToSlash(repoRoot)}
+	if _, err := exec.LookPath("git.exe"); err == nil {
+		gitExecutable = "git.exe"
+		gitPrefix = nil
+	}
+	gitCommand := func(args ...string) *exec.Cmd {
+		t.Helper()
+		args = append(append([]string{}, gitPrefix...), args...)
+		command := exec.Command(gitExecutable, args...)
+		command.Dir = repoRoot
+		return command
+	}
+	checkIgnored := gitCommand("check-ignore", "--quiet", "--no-index", "secrets/encryption_key")
+	if err := checkIgnored.Run(); err != nil {
+		t.Fatalf("generated Compose secret is not ignored: %v", err)
+	}
+	checkPlaceholder := gitCommand("check-ignore", "--quiet", "--no-index", "secrets/.gitkeep")
+	if err := checkPlaceholder.Run(); err == nil {
+		t.Fatal("tracked secrets placeholder is ignored")
+	}
+	trackedPlaceholder := gitCommand("ls-files", "--error-unmatch", "secrets/.gitkeep")
+	if output, err := trackedPlaceholder.CombinedOutput(); err != nil {
+		t.Fatalf("secrets placeholder is not tracked: %v: %s", err, output)
+	}
+	if _, err := os.ReadFile(filepath.Join(repoRoot, "secrets", ".gitkeep")); err != nil {
+		t.Fatalf("tracked secrets placeholder is not readable: %v", err)
+	}
+	dockerIgnore, err := os.ReadFile(filepath.Join(repoRoot, ".dockerignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(dockerIgnore), "secrets/*") || !strings.Contains(string(dockerIgnore), "!secrets/.gitkeep") {
+		t.Fatal("Docker context does not exclude generated secrets while retaining the placeholder")
+	}
+}
+
+func executableEntrypointForTest(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("entrypoint requires a POSIX shell")
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("entrypoint requires a POSIX shell")
+	}
+	entrypointSource, err := filepath.Abs(filepath.Join("..", "..", "docker-entrypoint.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entrypointSource
+}
 
 func TestSendNtfy(t *testing.T) {
 	var gotTitle, gotTags, gotEventID, gotBody string
@@ -37,6 +415,92 @@ func TestHealthz(t *testing.T) {
 	(&app{}).routes().ServeHTTP(response, request)
 	if response.Code != http.StatusOK || response.Body.String() != "{\"ok\":true}\n" {
 		t.Fatalf("health check returned %d: %q", response.Code, response.Body.String())
+	}
+}
+
+func TestDashboardHTMLContainsAccessibleLandmarks(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(b)
+	for _, required := range []string{
+		`<nav aria-label="Primary">`, `id="range-controls"`, `id="summary"`,
+		`id="provider-pulse"`, `id="provider-table-body"`, `id="latency-chart"`,
+		`id="incidents"`, `id="provider-drawer"`, `id="dashboard-status"`,
+		`aria-live="polite"`,
+	} {
+		if !strings.Contains(html, required) {
+			t.Errorf("missing %s", required)
+		}
+	}
+}
+
+func TestDashboardAssetsContainResponsiveMonitorDialog(t *testing.T) {
+	htmlBytes, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(htmlBytes), `<dialog id="monitor-dialog">`) {
+		t.Fatal("monitor management dialog is missing")
+	}
+
+	cssBytes, err := webFS.ReadFile("web/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cssBytes), "dialog .form { min-width: 0; width: 100%; }") {
+		t.Fatal("monitor dialog form must shrink to the dialog content width")
+	}
+}
+
+func TestProviderDrawerLabelsTheLatestCheckAccurately(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(b)
+	if !strings.Contains(html, `<dt>Last check</dt>`) {
+		t.Fatal("provider drawer must label the API's lastCheck value as Last check")
+	}
+	if strings.Contains(html, `<dt>Last successful check</dt>`) {
+		t.Fatal("provider drawer must not describe lastCheck as successful")
+	}
+}
+
+func TestPulseStylesBoundMaximumHistoryWithoutColorOnlyMeaning(t *testing.T) {
+	b, err := webFS.ReadFile("web/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(b)
+	if !strings.Contains(css, `.pulse-track { display: grid; min-width: 0; max-width: 100%; overflow: hidden; grid-template-columns: repeat(var(--pulse-bucket-count, 1), minmax(0, 1fr));`) {
+		t.Fatal("pulse track must scale every server bucket inside its available width")
+	}
+	if strings.Count(css, "repeating-linear-gradient") < 4 {
+		t.Fatal("pulse states must use distinct visible patterns in addition to color")
+	}
+}
+
+func TestStatsResetsRefreshMonitorSettingsAndDashboard(t *testing.T) {
+	b, err := webFS.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := string(b)
+	perProviderStart := strings.Index(app, "$('#reset-monitor-stats').addEventListener")
+	globalStart := strings.Index(app, "$('#reset-all-stats').addEventListener")
+	notificationStart := strings.Index(app, "$('#ntfy-form').addEventListener")
+	if perProviderStart < 0 || globalStart <= perProviderStart || notificationStart <= globalStart {
+		t.Fatal("could not locate reset handlers")
+	}
+	for name, block := range map[string]string{
+		"per-provider reset": app[perProviderStart:globalStart],
+		"global reset":       app[globalStart:notificationStart],
+	} {
+		if !strings.Contains(block, "loadMonitorSettings()") || !strings.Contains(block, "dashboard.refresh({supersede: true})") {
+			t.Errorf("%s must refresh both monitor settings and dashboard data", name)
+		}
 	}
 }
 
@@ -204,8 +668,7 @@ func TestMigrateExpandsProviderConstraint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &app{db: db}
-	if err = a.migrate(); err != nil {
+	if err = migrateDatabase(context.Background(), db); err != nil {
 		t.Fatalf("migrate failed: %v", err)
 	}
 	if _, err = db.Exec(`INSERT INTO monitors(provider,name,created_at,updated_at) VALUES('realdebrid','Real-Debrid',2,2)`); err != nil {
@@ -233,7 +696,7 @@ func TestResetHistoryScopesAndPreservesConfiguration(t *testing.T) {
 	db.SetMaxOpenConns(1)
 	defer db.Close()
 	a := &app{db: db}
-	if err = a.migrate(); err != nil {
+	if err = migrateDatabase(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}
 
@@ -301,4 +764,77 @@ func TestResetHistoryScopesAndPreservesConfiguration(t *testing.T) {
 	assertCount(`SELECT COUNT(*) FROM notification_outbox WHERE event_type='test'`, 1)
 	assertCount(`SELECT COUNT(*) FROM monitors`, 2)
 	assertCount(`SELECT COUNT(*) FROM monitor_secrets`, 2)
+}
+
+func TestUpdateMonitorRetriesImmediateCheckAfterRejection(t *testing.T) {
+	for _, rejection := range []string{"overlap", "capacity"} {
+		t.Run(rejection, func(t *testing.T) {
+			db := migratedTestDB(t)
+			monitorID := insertSyntheticMonitor(t, db, "torbox")
+			a := &app{db: db, runs: newRunCoordinator(1)}
+			now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+			if got := a.runs.Claim(monitorID, now, time.Hour); got != claimAccepted {
+				t.Fatalf("initial monitor claim = %v, want accepted", got)
+			}
+			blockerID := monitorID
+			if rejection == "capacity" {
+				a.runs.Release(monitorID)
+				blockerID = 99
+				if got := a.runs.Claim(blockerID, now, time.Hour); got != claimAccepted {
+					t.Fatalf("capacity holder claim = %v, want accepted", got)
+				}
+			}
+
+			body := strings.NewReader(`{"name":"Updated","apiKey":"","enabled":true,"intervalSeconds":3600,"timeoutSeconds":15,"failureThreshold":3,"recoveryThreshold":2,"publicCheck":false}`)
+			request := httptest.NewRequest(http.MethodPut, "/api/monitors/1", body)
+			request.Header.Set("Content-Type", "application/json")
+			request.SetPathValue("id", "1")
+			response := httptest.NewRecorder()
+			a.updateMonitor(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("update status = %d, body = %q", response.Code, response.Body.String())
+			}
+
+			a.runs.Release(blockerID)
+			if got := a.runs.Claim(monitorID, now.Add(time.Minute), time.Hour); got != claimAccepted {
+				t.Fatalf("post-update retry = %v, want accepted", got)
+			}
+		})
+	}
+}
+
+func TestManualMonitorCheckDistinguishesOverlapFromCapacity(t *testing.T) {
+	db := migratedTestDB(t)
+	monitorID := insertSyntheticMonitor(t, db, "torbox")
+	key := bytes.Repeat([]byte{1}, 32)
+	a := &app{db: db, key: key, runs: newRunCoordinator(1)}
+	nonce, ciphertext, err := a.encrypt([]byte("test-credential"), "monitor:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO monitor_secrets(monitor_id,nonce,ciphertext,updated_at) VALUES(?,?,?,?)`, monitorID, nonce, ciphertext, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	if got := a.runs.Claim(monitorID, now, time.Hour); got != claimAccepted {
+		t.Fatalf("monitor claim = %v, want accepted", got)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/monitors/1/test", nil)
+	request.SetPathValue("id", "1")
+	overlap := httptest.NewRecorder()
+	a.testMonitor(overlap, request)
+	if overlap.Code != http.StatusConflict {
+		t.Fatalf("overlap status = %d, want %d", overlap.Code, http.StatusConflict)
+	}
+	a.runs.Release(monitorID)
+
+	if got := a.runs.Claim(99, now, time.Hour); got != claimAccepted {
+		t.Fatalf("capacity holder claim = %v, want accepted", got)
+	}
+	capacity := httptest.NewRecorder()
+	a.testMonitor(capacity, request)
+	if capacity.Code != http.StatusServiceUnavailable {
+		t.Fatalf("capacity status = %d, want %d", capacity.Code, http.StatusServiceUnavailable)
+	}
 }

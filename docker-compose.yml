@@ -11,12 +11,20 @@ services:
     secrets:
       - encryption_key
     read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
     tmpfs:
       - /tmp
     restart: unless-stopped
 
 secrets:
   encryption_key:
+    # Keep this host file root:root mode 0400 as documented in README.md.
     file: ./secrets/encryption_key
 
 volumes:

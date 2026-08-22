@@ -22,7 +22,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/crypto/argon2"
@@ -38,15 +37,17 @@ const (
 	stateAuthFailed = "auth_failed"
 	stateAPI        = "api_issue"
 	stateConnection = "connection_issue"
+	maxKeyInputSize = 4 << 10
 )
+
+var errInvalidEncryptionKey = errors.New("invalid encryption key")
 
 type app struct {
 	db        *sql.DB
 	key       []byte
 	client    *http.Client
 	logger    *slog.Logger
-	lastRuns  map[int64]time.Time
-	runsMu    sync.Mutex
+	runs      *runCoordinator
 	cookieKey []byte
 }
 
@@ -106,6 +107,10 @@ type monitorState struct {
 }
 
 func main() {
+	maxConcurrentChecks, err := parseMaxConcurrentChecks(os.Getenv("DEBRIDUP_MAX_CONCURRENT_CHECKS"))
+	if err != nil {
+		panic(err)
+	}
 	dataDir := env("DEBRIDUP_DATA_DIR", "./data")
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		panic(err)
@@ -114,21 +119,26 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	db, err := sql.Open("sqlite", filepath.Join(dataDir, "debridup.db"))
+	db, err := openDatabase(filepath.Join(dataDir, "debridup.db"))
 	if err != nil {
 		panic(err)
 	}
 	defer db.Close()
 	cookieHash := sha256.Sum256(key)
-	a := &app{db: db, key: key, cookieKey: cookieHash[:], client: &http.Client{Timeout: 65 * time.Second}, logger: slog.Default(), lastRuns: map[int64]time.Time{}}
-	if err := a.migrate(); err != nil {
+	a := &app{db: db, key: key, cookieKey: cookieHash[:], client: &http.Client{Timeout: 65 * time.Second}, logger: slog.Default(), runs: newRunCoordinator(maxConcurrentChecks)}
+	if err := migrateDatabase(context.Background(), db); err != nil {
 		panic(err)
 	}
 	if err := a.ensureAdmin(os.Getenv("DEBRIDUP_ADMIN_PASSWORD")); err != nil {
 		panic(err)
 	}
+	retention, err := parseRetention(os.Getenv("DEBRIDUP_HISTORY_RETENTION"))
+	if err != nil {
+		panic(err)
+	}
 	go a.scheduler()
 	go a.notificationWorker()
+	go a.retentionWorker(context.Background(), retention)
 	addr := env("DEBRIDUP_ADDR", ":8080")
 	a.logger.Info("DebridUp started", "addr", addr)
 	server := &http.Server{Addr: addr, Handler: a.routes(), ReadHeaderTimeout: 10 * time.Second}
@@ -145,104 +155,36 @@ func env(k, fallback string) string {
 }
 
 func loadKey() ([]byte, error) {
-	v := os.Getenv("DEBRIDUP_ENCRYPTION_KEY")
-	if p := os.Getenv("DEBRIDUP_ENCRYPTION_KEY_FILE"); p != "" {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			return nil, err
+	var v string
+	if rawFD := os.Getenv("DEBRIDUP_ENCRYPTION_KEY_FD"); rawFD != "" {
+		fd, err := strconv.Atoi(rawFD)
+		if err != nil || fd < 0 {
+			return nil, errInvalidEncryptionKey
+		}
+		file := os.NewFile(uintptr(fd), "encryption-key")
+		if file == nil {
+			return nil, errInvalidEncryptionKey
+		}
+		b, readErr := io.ReadAll(io.LimitReader(file, maxKeyInputSize+1))
+		closeErr := file.Close()
+		if readErr != nil || closeErr != nil || len(b) > maxKeyInputSize {
+			return nil, errInvalidEncryptionKey
 		}
 		v = string(b)
+	} else if p := os.Getenv("DEBRIDUP_ENCRYPTION_KEY_FILE"); p != "" {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return nil, errInvalidEncryptionKey
+		}
+		v = string(b)
+	} else {
+		v = os.Getenv("DEBRIDUP_ENCRYPTION_KEY")
 	}
 	b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(v))
 	if err != nil || len(b) != chacha20poly1305.KeySize {
-		return nil, errors.New("DEBRIDUP_ENCRYPTION_KEY(_FILE) must be base64 for exactly 32 bytes")
+		return nil, errInvalidEncryptionKey
 	}
 	return b, nil
-}
-
-func (a *app) migrate() error {
-	_, err := a.db.Exec(`
-PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
-PRAGMA busy_timeout = 5000;
-CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS monitors (
- id INTEGER PRIMARY KEY, provider TEXT NOT NULL CHECK(provider IN ('torbox','premiumize','alldebrid','realdebrid','torrin','pikpak','offcloud','debridlink','easydebrid','debrider','deepbrid')), name TEXT NOT NULL,
- enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 60, timeout_seconds INTEGER NOT NULL DEFAULT 15,
- failure_threshold INTEGER NOT NULL DEFAULT 3, recovery_threshold INTEGER NOT NULL DEFAULT 2, public_check INTEGER NOT NULL DEFAULT 0,
- created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS monitor_secrets (monitor_id INTEGER PRIMARY KEY REFERENCES monitors(id) ON DELETE CASCADE, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL, key_version INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS monitor_states (
- monitor_id INTEGER PRIMARY KEY REFERENCES monitors(id) ON DELETE CASCADE, current_state TEXT NOT NULL DEFAULT 'healthy', state_since INTEGER NOT NULL,
- last_raw_state TEXT NOT NULL DEFAULT 'healthy', failure_streak INTEGER NOT NULL DEFAULT 0, recovery_streak INTEGER NOT NULL DEFAULT 0,
- failure_started_at INTEGER NOT NULL DEFAULT 0, last_check_at INTEGER
-);
-CREATE TABLE IF NOT EXISTS check_results (
- id INTEGER PRIMARY KEY, monitor_id INTEGER NOT NULL REFERENCES monitors(id) ON DELETE CASCADE, source TEXT NOT NULL CHECK(source IN ('authenticated','public')),
- state TEXT NOT NULL, duration_ms INTEGER NOT NULL, http_status INTEGER, error_code TEXT, error_detail TEXT, checked_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS check_results_monitor_time ON check_results(monitor_id, checked_at DESC);
-CREATE TABLE IF NOT EXISTS incidents (
- id INTEGER PRIMARY KEY, monitor_id INTEGER NOT NULL REFERENCES monitors(id) ON DELETE CASCADE, opened_at INTEGER NOT NULL, detected_at INTEGER NOT NULL,
- resolved_at INTEGER, initial_state TEXT NOT NULL, latest_state TEXT NOT NULL, summary TEXT
-);
-CREATE INDEX IF NOT EXISTS incidents_monitor_time ON incidents(monitor_id, opened_at DESC);
-CREATE TABLE IF NOT EXISTS incident_events (
- id INTEGER PRIMARY KEY, incident_id INTEGER NOT NULL REFERENCES incidents(id) ON DELETE CASCADE, type TEXT NOT NULL,
- previous_state TEXT, new_state TEXT NOT NULL, created_at INTEGER NOT NULL, check_id INTEGER REFERENCES check_results(id)
-);
-CREATE TABLE IF NOT EXISTS notification_channels (
- id INTEGER PRIMARY KEY, kind TEXT NOT NULL UNIQUE CHECK(kind='ntfy'), enabled INTEGER NOT NULL DEFAULT 0, nonce BLOB, ciphertext BLOB, updated_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS notification_outbox (
- id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE, incident_id INTEGER REFERENCES incidents(id) ON DELETE CASCADE,
- event_type TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL, delivered_at INTEGER, last_error TEXT
-);
-CREATE INDEX IF NOT EXISTS outbox_pending ON notification_outbox(status, next_attempt_at);
-`)
-	if err != nil {
-		return err
-	}
-	return a.migrateProviderConstraint()
-}
-
-func (a *app) migrateProviderConstraint() error {
-	var schema string
-	if err := a.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='monitors'`).Scan(&schema); err != nil {
-		return err
-	}
-	if strings.Contains(schema, "'deepbrid'") {
-		return nil
-	}
-	conn, err := a.db.Conn(context.Background())
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	if _, err = conn.ExecContext(context.Background(), `PRAGMA foreign_keys = OFF`); err != nil {
-		return err
-	}
-	defer conn.ExecContext(context.Background(), `PRAGMA foreign_keys = ON`)
-	tx, err := conn.BeginTx(context.Background(), nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err = tx.Exec(`
-CREATE TABLE monitors_new (
- id INTEGER PRIMARY KEY, provider TEXT NOT NULL CHECK(provider IN ('torbox','premiumize','alldebrid','realdebrid','torrin','pikpak','offcloud','debridlink','easydebrid','debrider','deepbrid')), name TEXT NOT NULL,
- enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 60, timeout_seconds INTEGER NOT NULL DEFAULT 15,
- failure_threshold INTEGER NOT NULL DEFAULT 3, recovery_threshold INTEGER NOT NULL DEFAULT 2, public_check INTEGER NOT NULL DEFAULT 0,
- created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-);
-INSERT INTO monitors_new SELECT * FROM monitors;
-DROP TABLE monitors;
-ALTER TABLE monitors_new RENAME TO monitors;
-`); err != nil {
-		return err
-	}
-	return tx.Commit()
 }
 
 func (a *app) ensureAdmin(password string) error {
@@ -303,8 +245,10 @@ func (a *app) decrypt(nonce, ciphertext []byte, aad string) ([]byte, error) {
 func (a *app) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]bool{"ok": true}) })
+	mux.HandleFunc("GET /readyz", a.readiness)
 	mux.HandleFunc("POST /login", a.login)
 	mux.HandleFunc("POST /logout", a.logout)
+	mux.HandleFunc("GET /api/dashboard", a.auth(a.dashboard))
 	mux.HandleFunc("GET /api/overview", a.auth(a.overview))
 	mux.HandleFunc("GET /api/monitors", a.auth(a.listMonitors))
 	mux.HandleFunc("POST /api/monitors", a.auth(a.createMonitor))
@@ -325,6 +269,14 @@ func (a *app) routes() http.Handler {
 	mux.Handle("GET /app.css", files)
 	mux.Handle("/", a.auth(func(w http.ResponseWriter, r *http.Request) { files.ServeHTTP(w, r) }))
 	return securityHeaders(mux)
+}
+
+func (a *app) readiness(w http.ResponseWriter, r *http.Request) {
+	if err := databaseReady(r.Context(), a.db); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"code": "database_unavailable", "error": "database is not ready"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func securityHeaders(next http.Handler) http.Handler {
@@ -420,51 +372,23 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func (a *app) scheduler() {
-	t := time.NewTicker(5 * time.Second)
-	defer t.Stop()
+func (a *app) retentionWorker(ctx context.Context, retention time.Duration) {
+	prune := func() {
+		if _, err := pruneHistory(ctx, a.db, time.Now().UTC().Add(-retention)); err != nil {
+			a.logger.Error("history prune failed", "error", err)
+		}
+	}
+	prune()
 	for {
-		a.runDueMonitors()
-		<-t.C
-	}
-}
-func (a *app) runDueMonitors() {
-	monitors, err := a.monitors()
-	if err != nil {
-		a.logger.Error("load monitors", "error", err)
-		return
-	}
-	now := time.Now()
-	for _, m := range monitors {
-		if !m.Enabled {
-			continue
-		}
-		a.runsMu.Lock()
-		last := a.lastRuns[m.ID]
-		due := last.IsZero() || now.Sub(last) >= time.Duration(m.IntervalSeconds)*time.Second
-		if due {
-			a.lastRuns[m.ID] = now
-		}
-		a.runsMu.Unlock()
-		if due {
-			go a.runMonitor(m)
-		}
-	}
-}
-func (a *app) runMonitor(m monitor) {
-	secret, err := a.monitorSecret(m.ID)
-	if err != nil {
-		a.logger.Error("load monitor secret", "monitor", m.ID, "error", err)
-		return
-	}
-	r := a.authCheck(m, secret)
-	if _, err = a.recordResult(m, "authenticated", r); err != nil {
-		a.logger.Error("record check", "monitor", m.ID, "error", err)
-	}
-	if m.PublicCheck {
-		pr := a.publicCheck(m)
-		if _, err = a.recordResult(m, "public", pr); err != nil {
-			a.logger.Error("record public check", "monitor", m.ID, "error", err)
+		now := time.Now().UTC()
+		next := now.Truncate(24 * time.Hour).Add(24 * time.Hour)
+		timer := time.NewTimer(time.Until(next))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+			prune()
 		}
 	}
 }
@@ -922,7 +846,13 @@ func (a *app) createMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m, _ := a.monitorByID(id)
-	go a.runMonitor(m)
+	a.runs.RequestImmediate(m.ID)
+	if a.runs.Claim(m.ID, time.Now(), time.Duration(m.IntervalSeconds)*time.Second) == claimAccepted {
+		go func(m monitor) {
+			defer a.runs.Release(m.ID)
+			a.runMonitor(m)
+		}(m)
+	}
 	writeJSON(w, 201, map[string]any{"id": id, "configured": true})
 }
 func boolInt(v bool) int {
@@ -1003,10 +933,13 @@ func (a *app) updateMonitor(w http.ResponseWriter, r *http.Request) {
 	if in.Enabled {
 		m, loadErr := a.monitorByID(id)
 		if loadErr == nil {
-			a.runsMu.Lock()
-			delete(a.lastRuns, id)
-			a.runsMu.Unlock()
-			go a.runMonitor(m)
+			a.runs.RequestImmediate(m.ID)
+		}
+		if loadErr == nil && a.runs.Claim(m.ID, time.Now(), time.Duration(m.IntervalSeconds)*time.Second) == claimAccepted {
+			go func(m monitor) {
+				defer a.runs.Release(m.ID)
+				a.runMonitor(m)
+			}(m)
 		}
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
@@ -1052,9 +985,7 @@ func (a *app) deleteMonitor(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]string{"error": "could not delete monitor"})
 		return
 	}
-	a.runsMu.Lock()
-	delete(a.lastRuns, id)
-	a.runsMu.Unlock()
+	a.runs.Forget(id)
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
@@ -1140,6 +1071,15 @@ func (a *app) testMonitor(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "monitor has no credential"})
 		return
 	}
+	switch a.runs.ClaimManual(m.ID, time.Now()) {
+	case claimOverlap:
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "monitor check already in progress"})
+		return
+	case claimCapacity:
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "monitor check capacity unavailable"})
+		return
+	}
+	defer a.runs.Release(m.ID)
 	result := a.authCheck(m, key)
 	_, err = a.recordResult(m, "authenticated", result)
 	if err != nil {
