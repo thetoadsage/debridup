@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -34,6 +35,34 @@ func TestOpenDatabaseAppliesConnectionPragmas(t *testing.T) {
 		if foreignKeys != 1 || busyTimeout != 5000 {
 			t.Fatalf("foreign_keys=%d busy_timeout=%d", foreignKeys, busyTimeout)
 		}
+	}
+}
+
+func TestDashboardCheckRangeMigrationAddsAndUsesSourceTimeIndex(t *testing.T) {
+	db := migratedTestDB(t)
+	rows, err := db.Query(`EXPLAIN QUERY PLAN
+		SELECT monitor_id,source,state,duration_ms,checked_at
+		FROM check_results
+		WHERE source='authenticated' AND checked_at>=? AND checked_at<?
+		ORDER BY monitor_id,checked_at,id`, 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(plan, "\n"), "USING INDEX check_results_source_time_monitor") {
+		t.Fatalf("query plan did not use dashboard range index: %v", plan)
 	}
 }
 

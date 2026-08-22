@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 const (
 	defaultHistoryRetention = 90 * 24 * time.Hour
@@ -113,6 +113,9 @@ func applyMigration(ctx context.Context, tx *sql.Tx, version int) error {
 			return err
 		}
 		return migrateProviderConstraint(ctx, tx)
+	case 2:
+		_, err := tx.ExecContext(ctx, `CREATE INDEX check_results_source_time_monitor ON check_results(source, checked_at, monitor_id)`)
+		return err
 	default:
 		return errors.New("unknown schema migration")
 	}

@@ -186,6 +186,29 @@ func TestDashboardSnapshotUsesOneReadOnlyTransactionAndThreeBulkQueries(t *testi
 	}
 }
 
+func TestDashboardReadOnlyTransactionRejectsWritesAndRestoresConnection(t *testing.T) {
+	a := testApp(t)
+	if err := migrateDatabase(context.Background(), a.db); err != nil {
+		t.Fatal(err)
+	}
+	a.db.SetMaxOpenConns(1)
+
+	var writeErr error
+	err := a.withReadOnlyDashboardTransaction(context.Background(), func(tx *sql.Tx) error {
+		_, writeErr = tx.ExecContext(context.Background(), `INSERT INTO monitors(provider,name,created_at,updated_at) VALUES('torbox','Rejected Write',1,1)`)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr == nil {
+		t.Fatal("write succeeded inside the dashboard snapshot transaction")
+	}
+	if _, err := a.db.Exec(`INSERT INTO monitors(provider,name,created_at,updated_at) VALUES('torbox','Normal Write',2,2)`); err != nil {
+		t.Fatalf("normal write failed after dashboard snapshot cleanup: %v", err)
+	}
+}
+
 func authenticatedRequest(t *testing.T, a *app, method, target string) *http.Request {
 	t.Helper()
 	data := []byte(strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
