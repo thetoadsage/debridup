@@ -14,6 +14,7 @@ import {
 import {renderLatencyChart, renderPulse} from './chart.mjs';
 import {createProviderDrawer} from './drawer.mjs';
 import {startDashboard} from './dashboard.mjs';
+import {applyTheme, normalizeTheme, setupThemePicker, storedTheme, THEMES} from './theme.mjs';
 
 class FakeElement {
   constructor() {
@@ -581,6 +582,47 @@ test('sidebar provider navigation targets the provider table before incidents', 
   const providers = markup.indexOf('id="providers-panel"');
   const incidents = markup.indexOf('id="incidents-panel"');
   assert.ok(providers >= 0 && incidents >= 0 && providers < incidents);
+});
+
+test('offers four named themes and falls back safely to graphite', () => {
+  assert.deepEqual(Object.keys(THEMES), ['graphite', 'neo-tokyo', 'sakura', 'terminal']);
+  assert.equal(normalizeTheme('sakura'), 'sakura');
+  assert.equal(normalizeTheme('not-a-theme'), 'graphite');
+  assert.equal(storedTheme({getItem: () => { throw new Error('blocked'); }}), 'graphite');
+});
+
+test('theme picker applies and persists a selected theme', () => {
+  const picker = new FakeElement();
+  picker.value = '';
+  const document = {
+    documentElement: {dataset: {}},
+    getElementById: id => id === 'theme-select' ? picker : null,
+  };
+  const values = new Map([['debridup-theme', 'neo-tokyo']]);
+  const storage = {
+    getItem: key => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+  };
+
+  const controller = setupThemePicker({document, storage});
+  assert.equal(document.documentElement.dataset.theme, 'neo-tokyo');
+  assert.equal(picker.value, 'neo-tokyo');
+
+  picker.value = 'terminal';
+  picker.emit('change');
+  assert.equal(controller.theme, 'terminal');
+  assert.equal(values.get('debridup-theme'), 'terminal');
+
+  controller.stop();
+  picker.value = 'sakura';
+  picker.emit('change');
+  assert.equal(document.documentElement.dataset.theme, 'terminal');
+});
+
+test('theme application rejects unknown values', () => {
+  const document = {documentElement: {dataset: {}}};
+  assert.equal(applyTheme(document, 'unknown'), 'graphite');
+  assert.equal(document.documentElement.dataset.theme, 'graphite');
 });
 
 test('keeps the last successful model on failure and renders its age with retry', async () => {

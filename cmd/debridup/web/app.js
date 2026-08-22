@@ -1,5 +1,6 @@
 import {startDashboard} from './dashboard.mjs';
 import {escapeHTML, formatState, formatTimestamp} from './dashboard-model.mjs';
+import {setupThemePicker} from './theme.mjs';
 
 const $ = selector => document.querySelector(selector);
 const SAFE_STATES = new Set(['healthy', 'auth_failed', 'api_issue', 'connection_issue', 'checking', 'unknown']);
@@ -19,6 +20,8 @@ const providerDetails = {
   debrider: {name: 'Debrider', credential: 'API key'},
   deepbrid: {name: 'Deepbrid', credential: 'API key'},
 };
+
+setupThemePicker({document, storage: window.localStorage});
 
 function stateClass(value) {
   return SAFE_STATES.has(value) ? value : 'unknown';

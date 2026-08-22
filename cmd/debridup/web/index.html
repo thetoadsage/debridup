@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>DebridUp</title>
+  <script src="/theme-init.js"></script>
   <link rel="stylesheet" href="/app.css">
   <link rel="stylesheet" href="/chart.css">
   <link rel="stylesheet" href="/notifications.css">
@@ -27,7 +28,18 @@
         <a class="nav-link" href="#notification-settings">Settings</a>
       </nav>
 
-      <button id="logout" class="quiet sidebar-signout" type="button">Sign out</button>
+      <div class="sidebar-footer">
+        <label class="theme-picker" for="theme-select">
+          <span>Theme</span>
+          <select id="theme-select" aria-label="Color theme">
+            <option value="graphite">Graphite</option>
+            <option value="neo-tokyo">Neo Tokyo</option>
+            <option value="sakura">Sakura</option>
+            <option value="terminal">Terminal</option>
+          </select>
+        </label>
+        <button id="logout" class="quiet sidebar-signout" type="button">Sign out</button>
+      </div>
     </aside>
 
     <main id="dashboard-main" class="dashboard-main">

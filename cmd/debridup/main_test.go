@@ -418,6 +418,18 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+func TestThemeBootstrapIsAvailableBeforeAuthentication(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/theme-init.js", nil)
+	response := httptest.NewRecorder()
+	(&app{}).routes().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("theme bootstrap returned %d: %q", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "debridup-theme") {
+		t.Fatal("theme bootstrap asset was not served")
+	}
+}
+
 func TestDashboardHTMLContainsAccessibleLandmarks(t *testing.T) {
 	b, err := webFS.ReadFile("web/index.html")
 	if err != nil {
@@ -428,7 +440,7 @@ func TestDashboardHTMLContainsAccessibleLandmarks(t *testing.T) {
 		`<nav aria-label="Primary">`, `id="range-controls"`, `id="summary"`,
 		`id="provider-pulse"`, `id="provider-table-body"`, `id="latency-chart"`,
 		`id="incidents"`, `id="provider-drawer"`, `id="dashboard-status"`,
-		`aria-live="polite"`,
+		`aria-live="polite"`, `id="theme-select"`,
 	} {
 		if !strings.Contains(html, required) {
 			t.Errorf("missing %s", required)
