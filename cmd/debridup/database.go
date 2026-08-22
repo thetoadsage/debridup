@@ -56,6 +56,11 @@ CREATE INDEX IF NOT EXISTS outbox_pending ON notification_outbox(status, next_at
 `
 
 func openDatabase(path string) (*sql.DB, error) {
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	path = absolutePath
 	if filepath.VolumeName(path) != "" {
 		path = "/" + path
 	}

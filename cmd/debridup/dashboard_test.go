@@ -158,6 +158,43 @@ func TestDashboardSnapshotReturnsNonNilArraysForEmptyDatabase(t *testing.T) {
 	}
 }
 
+func TestDashboardSnapshotExcludesDisabledMonitorsFromOverallHealth(t *testing.T) {
+	a := testApp(t)
+	if err := migrateDatabase(context.Background(), a.db); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	for _, monitor := range []struct {
+		provider string
+		enabled  int
+		state    string
+	}{
+		{provider: "torbox", enabled: 1, state: stateHealthy},
+		{provider: "premiumize", enabled: 0, state: stateAPI},
+	} {
+		result, err := a.db.Exec(`INSERT INTO monitors(provider,name,enabled,created_at,updated_at) VALUES(?,?,?,?,?)`, monitor.provider, monitor.provider, monitor.enabled, now.Unix(), now.Unix())
+		if err != nil {
+			t.Fatal(err)
+		}
+		monitorID, err := result.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := a.db.Exec(`INSERT INTO monitor_states(monitor_id,current_state,state_since,last_raw_state,last_check_at) VALUES(?,?,?,?,?)`, monitorID, monitor.state, now.Unix(), monitor.state, now.Unix()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	spec, _ := parseDashboardRange("24h")
+	got, err := a.dashboardSnapshot(context.Background(), spec, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Summary.OverallState != stateHealthy || got.Summary.ProvidersOnline != 1 {
+		t.Fatalf("summary=%#v", got.Summary)
+	}
+}
+
 func TestDashboardSnapshotUsesOneReadOnlyTransactionAndThreeBulkQueries(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dashboard.db")
 	seedDB, err := openDatabase(path)

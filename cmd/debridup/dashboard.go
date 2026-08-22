@@ -309,11 +309,13 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 			provider.provider.SlowestMS = int64Pointer(slowest)
 		}
 
-		switch {
-		case provider.provider.State != stateHealthy && provider.provider.State != "unknown":
-			response.Summary.OverallState = "outage"
-		case provider.provider.State == "unknown" && response.Summary.OverallState == stateHealthy:
-			response.Summary.OverallState = "degraded"
+		if provider.enabled {
+			switch {
+			case provider.provider.State != stateHealthy && provider.provider.State != "unknown":
+				response.Summary.OverallState = "outage"
+			case provider.provider.State == "unknown" && response.Summary.OverallState == stateHealthy:
+				response.Summary.OverallState = "degraded"
+			}
 		}
 		if provider.enabled && provider.provider.State == stateHealthy {
 			response.Summary.ProvidersOnline++

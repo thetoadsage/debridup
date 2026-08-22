@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -35,6 +36,32 @@ func TestOpenDatabaseAppliesConnectionPragmas(t *testing.T) {
 		if foreignKeys != 1 || busyTimeout != 5000 {
 			t.Fatalf("foreign_keys=%d busy_timeout=%d", foreignKeys, busyTimeout)
 		}
+	}
+}
+
+func TestOpenDatabaseAcceptsRelativePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativePath, err := filepath.Rel(workingDirectory, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := openDatabase(relativePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateDatabase(context.Background(), db); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("relative database path was not created at %q: %v", path, err)
 	}
 }
 
