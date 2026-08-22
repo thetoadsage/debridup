@@ -53,6 +53,7 @@ test('verification workflow supports direct and reusable execution', () => {
 test('verification job runs every required gate with fixed toolchains', () => {
   const workflow = readWorkflow('test.yml');
   const verify = jobBlock(workflow, 'verify');
+  const dockerfile = readFileSync(resolve(root, 'Dockerfile'), 'utf8');
 
   for (const expected of [
     'go-version: "1.25.14"',
@@ -76,6 +77,10 @@ test('verification job runs every required gate with fixed toolchains', () => {
   assert.match(verify, /github\.event\.pull_request\.body/);
   assert.match(verify, /BASE_SHA:/);
   assert.match(verify, /0000000000000000000000000000000000000000/);
+
+  const workflowGo = verify.match(/go-version:\s*"([^"]+)"/)?.[1];
+  const imageGo = dockerfile.match(/^FROM golang:([0-9.]+)-alpine AS build$/m)?.[1];
+  assert.equal(imageGo, workflowGo, 'Docker builder Go version must match the CI security toolchain');
 });
 
 test('container publication depends on the reusable verification workflow', () => {
