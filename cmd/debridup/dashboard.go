@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
+	"log/slog"
 	"math"
+	"net/http"
 	"sort"
 	"time"
 )
@@ -68,6 +72,11 @@ type dashboardIncident struct {
 	InitialState string `json:"initialState"`
 	LatestState  string `json:"latestState"`
 	Summary      string `json:"summary"`
+}
+
+type apiError struct {
+	Code  string `json:"code"`
+	Error string `json:"error"`
 }
 
 func parseDashboardRange(raw string) (dashboardRange, error) {
@@ -158,4 +167,196 @@ func aggregateSeries(samples []dashboardSample, spec dashboardRange, start, end 
 		points = append(points, point)
 	}
 	return points
+}
+
+func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now time.Time) (dashboardResponse, error) {
+	now = now.UTC()
+	start := now.Add(-spec.Window)
+	response := dashboardResponse{
+		GeneratedAt: now.Unix(),
+		Range:       dashboardRangeLabel(spec),
+		Providers:   make([]dashboardProvider, 0),
+		Incidents:   make([]dashboardIncident, 0),
+		Summary: dashboardSummary{
+			OverallState: stateHealthy,
+		},
+	}
+
+	tx, err := a.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return dashboardResponse{}, fmt.Errorf("begin dashboard snapshot: %w", err)
+	}
+	defer tx.Rollback()
+
+	type providerState struct {
+		provider dashboardProvider
+		enabled  bool
+	}
+	providers := make([]providerState, 0)
+	rows, err := tx.QueryContext(ctx, `SELECT m.id,m.name,m.provider,m.enabled,s.current_state,s.state_since,s.last_check_at
+		FROM monitors m LEFT JOIN monitor_states s ON s.monitor_id=m.id ORDER BY m.id`)
+	if err != nil {
+		return dashboardResponse{}, fmt.Errorf("load dashboard providers: %w", err)
+	}
+	for rows.Next() {
+		var currentState sql.NullString
+		var stateSince, lastCheck sql.NullInt64
+		var provider providerState
+		if err := rows.Scan(&provider.provider.ID, &provider.provider.Name, &provider.provider.Provider, &provider.enabled, &currentState, &stateSince, &lastCheck); err != nil {
+			rows.Close()
+			return dashboardResponse{}, fmt.Errorf("scan dashboard provider: %w", err)
+		}
+		provider.provider.State = "unknown"
+		provider.provider.Series = make([]dashboardPoint, 0)
+		if currentState.Valid && lastCheck.Valid {
+			provider.provider.State = currentState.String
+			provider.provider.LastCheck = int64Pointer(lastCheck.Int64)
+			if stateSince.Valid {
+				provider.provider.StateSince = int64Pointer(stateSince.Int64)
+			}
+		}
+		providers = append(providers, provider)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return dashboardResponse{}, fmt.Errorf("iterate dashboard providers: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return dashboardResponse{}, fmt.Errorf("close dashboard providers: %w", err)
+	}
+
+	samplesByMonitor := make(map[int64][]dashboardSample)
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	rows, err = tx.QueryContext(ctx, `SELECT monitor_id,source,state,duration_ms,checked_at
+		FROM check_results WHERE source='authenticated' AND checked_at>=? AND checked_at<?
+		ORDER BY monitor_id,checked_at,id`, start.Unix(), now.Unix())
+	if err != nil {
+		return dashboardResponse{}, fmt.Errorf("load dashboard checks: %w", err)
+	}
+	for rows.Next() {
+		var monitorID, checkedAt int64
+		var sample dashboardSample
+		if err := rows.Scan(&monitorID, &sample.Source, &sample.State, &sample.DurationMS, &checkedAt); err != nil {
+			rows.Close()
+			return dashboardResponse{}, fmt.Errorf("scan dashboard check: %w", err)
+		}
+		sample.CheckedAt = time.Unix(checkedAt, 0).UTC()
+		samplesByMonitor[monitorID] = append(samplesByMonitor[monitorID], sample)
+		if !sample.CheckedAt.Before(midnight) {
+			response.Summary.ChecksToday++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return dashboardResponse{}, fmt.Errorf("iterate dashboard checks: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return dashboardResponse{}, fmt.Errorf("close dashboard checks: %w", err)
+	}
+
+	rows, err = tx.QueryContext(ctx, `SELECT i.id,i.monitor_id,m.name,m.provider,i.opened_at,i.detected_at,i.resolved_at,
+		i.initial_state,i.latest_state,COALESCE(i.summary,'')
+		FROM incidents i JOIN monitors m ON m.id=i.monitor_id
+		WHERE i.opened_at<? AND (i.resolved_at IS NULL OR i.resolved_at>?)
+		ORDER BY i.opened_at DESC,i.id DESC`, now.Unix(), start.Unix())
+	if err != nil {
+		return dashboardResponse{}, fmt.Errorf("load dashboard incidents: %w", err)
+	}
+	for rows.Next() {
+		var incident dashboardIncident
+		var resolvedAt sql.NullInt64
+		if err := rows.Scan(&incident.ID, &incident.MonitorID, &incident.Name, &incident.Provider, &incident.OpenedAt, &incident.DetectedAt, &resolvedAt, &incident.InitialState, &incident.LatestState, &incident.Summary); err != nil {
+			rows.Close()
+			return dashboardResponse{}, fmt.Errorf("scan dashboard incident: %w", err)
+		}
+		if resolvedAt.Valid {
+			incident.ResolvedAt = int64Pointer(resolvedAt.Int64)
+		} else {
+			response.Summary.ActiveIncidents++
+		}
+		response.Incidents = append(response.Incidents, incident)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return dashboardResponse{}, fmt.Errorf("iterate dashboard incidents: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return dashboardResponse{}, fmt.Errorf("close dashboard incidents: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return dashboardResponse{}, fmt.Errorf("commit dashboard snapshot: %w", err)
+	}
+
+	for _, provider := range providers {
+		samples := samplesByMonitor[provider.provider.ID]
+		provider.provider.Series = aggregateSeries(samples, spec, start, now)
+		if len(samples) > 0 {
+			latencies := make([]int64, 0, len(samples))
+			healthy := 0
+			var slowest int64
+			for _, sample := range samples {
+				if sample.State == stateHealthy {
+					healthy++
+				}
+				latencies = append(latencies, sample.DurationMS)
+				if sample.DurationMS > slowest {
+					slowest = sample.DurationMS
+				}
+			}
+			availability := float64(healthy) / float64(len(samples)) * 100
+			provider.provider.Availability = &availability
+			provider.provider.P50MS = nearestRank(latencies, .50)
+			provider.provider.P95MS = nearestRank(latencies, .95)
+			provider.provider.SlowestMS = int64Pointer(slowest)
+		}
+
+		switch {
+		case provider.provider.State != stateHealthy && provider.provider.State != "unknown":
+			response.Summary.OverallState = "outage"
+		case provider.provider.State == "unknown" && response.Summary.OverallState == stateHealthy:
+			response.Summary.OverallState = "degraded"
+		}
+		if provider.enabled && provider.provider.State == stateHealthy {
+			response.Summary.ProvidersOnline++
+		}
+		response.Providers = append(response.Providers, provider.provider)
+	}
+	return response, nil
+}
+
+func dashboardRangeLabel(spec dashboardRange) string {
+	switch spec.Window {
+	case 24 * time.Hour:
+		return "24h"
+	case 7 * 24 * time.Hour:
+		return "7d"
+	case 30 * 24 * time.Hour:
+		return "30d"
+	default:
+		return ""
+	}
+}
+
+func int64Pointer(value int64) *int64 {
+	return &value
+}
+
+func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
+	rawRange := r.URL.Query().Get("range")
+	spec, err := parseDashboardRange(rawRange)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Code: "invalid_range", Error: "range must be one of 24h, 7d, or 30d"})
+		return
+	}
+	response, err := a.dashboardSnapshot(r.Context(), spec, time.Now().UTC())
+	if err != nil {
+		logger := a.logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Error("dashboard snapshot failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, apiError{Code: "dashboard_unavailable", Error: "could not load dashboard"})
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
 }
