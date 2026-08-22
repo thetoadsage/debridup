@@ -124,6 +124,13 @@ func pulseState(samples []dashboardSample) string {
 	}
 }
 
+func dashboardDisplayState(current, lastRaw string) string {
+	if current == stateHealthy && lastRaw != "" && lastRaw != stateHealthy {
+		return stateDegraded
+	}
+	return current
+}
+
 func aggregateSeries(samples []dashboardSample, spec dashboardRange, start, end time.Time) []dashboardPoint {
 	if spec.Bucket <= 0 || spec.MaxPoints <= 0 || !end.After(start) {
 		return []dashboardPoint{}
@@ -185,23 +192,25 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 	}
 
 	type providerState struct {
-		provider dashboardProvider
-		enabled  bool
+		provider       dashboardProvider
+		enabled        bool
+		lastRawState   string
+		failureStarted *int64
 	}
 	providers := make([]providerState, 0)
 	samplesByMonitor := make(map[int64][]dashboardSample)
 	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	err := a.withReadOnlyDashboardTransaction(ctx, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `SELECT m.id,m.name,m.provider,m.enabled,s.current_state,s.state_since,s.last_check_at
+		rows, err := tx.QueryContext(ctx, `SELECT m.id,m.name,m.provider,m.enabled,s.current_state,s.state_since,s.last_raw_state,s.failure_started_at,s.last_check_at
 		FROM monitors m LEFT JOIN monitor_states s ON s.monitor_id=m.id ORDER BY m.id`)
 		if err != nil {
 			return fmt.Errorf("load dashboard providers: %w", err)
 		}
 		for rows.Next() {
-			var currentState sql.NullString
-			var stateSince, lastCheck sql.NullInt64
+			var currentState, lastRawState sql.NullString
+			var stateSince, failureStarted, lastCheck sql.NullInt64
 			var provider providerState
-			if err := rows.Scan(&provider.provider.ID, &provider.provider.Name, &provider.provider.Provider, &provider.enabled, &currentState, &stateSince, &lastCheck); err != nil {
+			if err := rows.Scan(&provider.provider.ID, &provider.provider.Name, &provider.provider.Provider, &provider.enabled, &currentState, &stateSince, &lastRawState, &failureStarted, &lastCheck); err != nil {
 				rows.Close()
 				return fmt.Errorf("scan dashboard provider: %w", err)
 			}
@@ -212,6 +221,12 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 				provider.provider.LastCheck = int64Pointer(lastCheck.Int64)
 				if stateSince.Valid {
 					provider.provider.StateSince = int64Pointer(stateSince.Int64)
+				}
+				if lastRawState.Valid {
+					provider.lastRawState = lastRawState.String
+				}
+				if failureStarted.Valid {
+					provider.failureStarted = int64Pointer(failureStarted.Int64)
 				}
 			}
 			providers = append(providers, provider)
@@ -287,6 +302,10 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 	}
 
 	for _, provider := range providers {
+		provider.provider.State = dashboardDisplayState(provider.provider.State, provider.lastRawState)
+		if provider.provider.State == stateDegraded && provider.failureStarted != nil {
+			provider.provider.StateSince = provider.failureStarted
+		}
 		samples := samplesByMonitor[provider.provider.ID]
 		provider.provider.Series = aggregateSeries(samples, spec, start, now)
 		if len(samples) > 0 {
@@ -311,6 +330,8 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 
 		if provider.enabled {
 			switch {
+			case provider.provider.State == stateDegraded && response.Summary.OverallState == stateHealthy:
+				response.Summary.OverallState = stateDegraded
 			case provider.provider.State != stateHealthy && provider.provider.State != "unknown":
 				response.Summary.OverallState = "outage"
 			case provider.provider.State == "unknown" && response.Summary.OverallState == stateHealthy:

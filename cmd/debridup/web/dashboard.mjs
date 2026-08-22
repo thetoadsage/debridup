@@ -9,7 +9,7 @@ import {createProviderDrawer} from './drawer.mjs';
 const DEFAULT_RANGE = '24h';
 const REFRESH_INTERVAL_MS = 30_000;
 const RANGE_VALUES = new Set(['24h', '7d', '30d']);
-const PROVIDER_STATES = new Set(['healthy', 'auth_failed', 'api_issue', 'connection_issue', 'checking', 'unknown']);
+const PROVIDER_STATES = new Set(['healthy', 'degraded', 'auth_failed', 'api_issue', 'connection_issue', 'checking', 'unknown']);
 const SUMMARY_STATES = new Set(['healthy', 'degraded', 'outage', 'unknown']);
 const PULSE_STATES = new Set(['healthy', 'degraded', 'outage', 'unknown']);
 const STATE_SYMBOLS = Object.freeze({healthy: '✓', degraded: '!', outage: '×', unknown: '?'});

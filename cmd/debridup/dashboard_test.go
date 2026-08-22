@@ -195,6 +195,42 @@ func TestDashboardSnapshotExcludesDisabledMonitorsFromOverallHealth(t *testing.T
 	}
 }
 
+func TestDashboardSnapshotShowsUnconfirmedLatestFailureAsDegraded(t *testing.T) {
+	a := testApp(t)
+	if err := migrateDatabase(context.Background(), a.db); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	result, err := a.db.Exec(`INSERT INTO monitors(provider,name,enabled,created_at,updated_at) VALUES(?,?,?,?,?)`, "torbox", "TorBox", 1, now.Unix(), now.Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitorID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	failureStarted := now.Add(-time.Minute).Unix()
+	if _, err := a.db.Exec(`INSERT INTO monitor_states(monitor_id,current_state,state_since,last_raw_state,failure_started_at,last_check_at) VALUES(?,?,?,?,?,?)`, monitorID, stateHealthy, now.Add(-time.Hour).Unix(), stateConnection, failureStarted, failureStarted); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`INSERT INTO check_results(monitor_id,source,state,duration_ms,checked_at) VALUES(?,?,?,?,?)`, monitorID, "authenticated", stateConnection, 15000, failureStarted); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, _ := parseDashboardRange("24h")
+	got, err := a.dashboardSnapshot(context.Background(), spec, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := got.Providers[0]
+	if provider.State != stateDegraded || provider.StateSince == nil || *provider.StateSince != failureStarted {
+		t.Fatalf("provider=%#v", provider)
+	}
+	if got.Summary.OverallState != stateDegraded || got.Summary.ProvidersOnline != 0 || got.Summary.ActiveIncidents != 0 {
+		t.Fatalf("summary=%#v", got.Summary)
+	}
+}
+
 func TestDashboardSnapshotUsesOneReadOnlyTransactionAndThreeBulkQueries(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dashboard.db")
 	seedDB, err := openDatabase(path)

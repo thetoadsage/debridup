@@ -34,6 +34,7 @@ var webFS embed.FS
 
 const (
 	stateHealthy    = "healthy"
+	stateDegraded   = "degraded"
 	stateAuthFailed = "auth_failed"
 	stateAPI        = "api_issue"
 	stateConnection = "connection_issue"

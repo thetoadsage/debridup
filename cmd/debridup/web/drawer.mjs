@@ -8,7 +8,7 @@ const FOCUSABLE_SELECTOR = [
   'textarea:not([disabled])',
   '[tabindex]:not([tabindex="-1"])',
 ].join(',');
-const SAFE_STATES = new Set(['healthy', 'auth_failed', 'api_issue', 'connection_issue', 'checking', 'unknown']);
+const SAFE_STATES = new Set(['healthy', 'degraded', 'auth_failed', 'api_issue', 'connection_issue', 'checking', 'unknown']);
 
 export function createProviderDrawer(root) {
   if (!root) throw new Error('provider drawer root is required');
