@@ -12,6 +12,7 @@ const RANGE_VALUES = new Set(['24h', '7d', '30d']);
 const PROVIDER_STATES = new Set(['healthy', 'auth_failed', 'api_issue', 'connection_issue', 'checking', 'unknown']);
 const SUMMARY_STATES = new Set(['healthy', 'degraded', 'outage', 'unknown']);
 const PULSE_STATES = new Set(['healthy', 'degraded', 'outage', 'unknown']);
+const STATE_SYMBOLS = Object.freeze({healthy: '✓', degraded: '!', outage: '×', unknown: '?'});
 
 function safeState(value, allowed = PROVIDER_STATES) {
   return allowed.has(value) ? value : 'unknown';
@@ -38,7 +39,7 @@ function renderProviderTable(element, providers) {
     const quality = state === 'unknown' ? '<span class="quality-note">Data unavailable</span>' : '';
     const strip = provider.series.slice(-12).map(point => {
       const pointState = safeState(point?.state, PULSE_STATES);
-      return `<span class="status-segment ${pointState}"><span class="sr-only">${escapeHTML(formatState(pointState))}</span></span>`;
+      return `<span class="status-segment ${pointState}"><span class="status-symbol" aria-hidden="true">${STATE_SYMBOLS[pointState]}</span><span class="sr-only">${escapeHTML(formatState(pointState))}</span></span>`;
     }).join('') || '<span class="muted">No range data</span>';
     return `<tr><th scope="row"><button class="provider-detail-trigger" type="button" data-provider-id="${Number(provider.id) || 0}">${escapeHTML(provider.name || 'Unnamed provider')}</button>${quality}</th><td><span class="state ${state}">${escapeHTML(provider.stateLabel)}</span></td><td>${escapeHTML(provider.availabilityLabel)}</td><td>${escapeHTML(provider.p50Label)}</td><td>${escapeHTML(provider.p95Label)}</td><td>${escapeHTML(provider.lastCheckLabel)}</td><td><span class="status-strip">${strip}</span></td></tr>`;
   }).join('');
@@ -71,6 +72,12 @@ function renderAvailabilityComparison(element, providers) {
 
 function setBusy(elements, value) {
   for (const element of elements) element?.setAttribute('aria-busy', String(value));
+}
+
+function setLatencyAccessibility(element, label) {
+  if (!element) return;
+  element.setAttribute('role', 'group');
+  element.setAttribute('aria-label', label);
 }
 
 export function startDashboard({api, document, window}) {
@@ -129,8 +136,7 @@ export function startDashboard({api, document, window}) {
     renderProviderTable(providerTable, model.providers);
     if (latency) {
       latency.innerHTML = renderLatencyChart(model.providers);
-      latency.setAttribute('role', 'group');
-      latency.setAttribute('aria-label', 'Provider latency comparison and text summary');
+      setLatencyAccessibility(latency, 'Provider latency comparison and text summary');
     }
     renderIncidents(incidents, model.incidents);
     renderAvailabilityComparison(comparison, model.providers);
@@ -147,13 +153,20 @@ export function startDashboard({api, document, window}) {
   function renderFailureStatus() {
     if (!status) return;
     if (lastPayload) {
+      if (RANGE_VALUES.has(lastPayload.range) && lastPayload.range !== range) {
+        range = lastPayload.range;
+        updateRangeButtons();
+      }
       renderModel(createDashboardModel(lastPayload, now()));
       status.innerHTML = `Unable to refresh. Showing data from ${escapeHTML(model.ageLabel)} ago. <button class="status-retry" type="button" data-dashboard-retry>Retry</button>`;
     } else {
       if (summary) summary.innerHTML = '<h2 id="summary-heading" class="sr-only">Current status summary</h2><article class="summary-card"><span class="summary-label">Overall status</span><strong class="summary-value summary-state unknown">Unavailable</strong></article><article class="summary-card"><span class="summary-label">Providers online</span><strong class="summary-value">—</strong></article><article class="summary-card"><span class="summary-label">Active incidents</span><strong class="summary-value">—</strong></article><article class="summary-card"><span class="summary-label">Checks completed today</span><strong class="summary-value">—</strong></article>';
       if (pulse) pulse.innerHTML = '<div class="section-title"><div><h2 id="pulse-heading">Provider pulse</h2><p class="muted">Health changes across the selected range.</p></div></div><div class="dashboard-empty"><p>Dashboard data is unavailable.</p></div>';
       if (providerTable) providerTable.innerHTML = '<tr><td colspan="7"><div class="dashboard-empty"><p>Dashboard data is unavailable.</p></div></td></tr>';
-      if (latency) latency.innerHTML = '<div class="chart-empty"><strong>Dashboard data is unavailable.</strong><p>Retry to load provider latency.</p></div>';
+      if (latency) {
+        latency.innerHTML = '<div class="chart-empty"><strong>Dashboard data is unavailable.</strong><p>Retry to load provider latency.</p></div>';
+        setLatencyAccessibility(latency, 'Provider latency unavailable');
+      }
       if (incidents) incidents.innerHTML = '<div class="dashboard-empty"><p>Dashboard data is unavailable.</p></div>';
       if (comparison) comparison.innerHTML = '<p class="muted">Dashboard data is unavailable.</p>';
       setBusy(busyElements, false);
@@ -183,6 +196,10 @@ export function startDashboard({api, document, window}) {
       .then(payload => {
         if (controller.signal.aborted || activeRefresh?.token !== token) return model;
         lastPayload = payload || {};
+        if (RANGE_VALUES.has(lastPayload.range)) {
+          range = lastPayload.range;
+          updateRangeButtons();
+        }
         renderModel(createDashboardModel(lastPayload, now()));
         renderSuccessStatus();
         return model;

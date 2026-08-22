@@ -311,6 +311,39 @@ test('renders one accessible pulse button for every server bucket', () => {
   assert.match(markup, /Provider &lt;Alpha&gt;: Outage/);
 });
 
+test('renders visible pulse symbols alongside accessible bucket names', () => {
+  const markup = renderPulse([{
+    id: 1,
+    name: 'Provider Alpha',
+    series: [
+      {bucketStart: 1787317200, state: 'healthy'},
+      {bucketStart: 1787318100, state: 'degraded'},
+      {bucketStart: 1787319000, state: 'outage'},
+      {bucketStart: 1787319900, state: 'unknown'},
+    ],
+  }]);
+
+  assert.equal((markup.match(/class="pulse-symbol"/g) || []).length, 4);
+  assert.match(markup, /<span class="pulse-symbol" aria-hidden="true">✓<\/span>/);
+  assert.match(markup, /<span class="pulse-symbol" aria-hidden="true">!<\/span>/);
+  assert.match(markup, /<span class="pulse-symbol" aria-hidden="true">×<\/span>/);
+  assert.match(markup, /<span class="pulse-symbol" aria-hidden="true">\?<\/span>/);
+});
+
+test('renders the maximum server bucket count into a bounded pulse grid', () => {
+  const markup = renderPulse([{
+    id: 1,
+    name: 'Provider Alpha',
+    series: Array.from({length: 96}, (_, index) => ({
+      bucketStart: 1787317200 + index * 900,
+      state: 'healthy',
+    })),
+  }]);
+
+  assert.equal((markup.match(/<button/g) || []).length, 96);
+  assert.match(markup, /class="pulse-track" style="--pulse-bucket-count:96"/);
+});
+
 test('renders explicit empty latency markup with fewer than two measured points', () => {
   const markup = renderLatencyChart([{
     id: 1,
@@ -342,6 +375,25 @@ test('renders latency paths with axes, units, legend, and a summary table', () =
   assert.match(markup, /Provider Alpha/);
   assert.match(markup, /<table class="chart-summary"/);
   assert.match(markup, />105 ms</);
+});
+
+test('renders a latency comparison when two measured points belong to different providers', () => {
+  const markup = renderLatencyChart([
+    {
+      id: 1,
+      name: 'Provider Alpha',
+      series: [{bucketStart: 1787317200, p95Ms: 100}],
+    },
+    {
+      id: 2,
+      name: 'Provider Beta',
+      series: [{bucketStart: 1787318100, p95Ms: 150}],
+    },
+  ]);
+
+  assert.match(markup, /<svg[^>]+role="img"/);
+  assert.equal((markup.match(/class="latency-series"/g) || []).length, 2);
+  assert.equal((markup.match(/class="latency-point"/g) || []).length, 2);
 });
 
 test('opens and populates the provider drawer before focusing its close button', () => {
@@ -396,6 +448,25 @@ test('traps drawer focus and restores the captured trigger on close', () => {
   assert.equal(trigger.focusCount, 2);
 });
 
+test('restores drawer focus to the connected replacement after dashboard rerender', () => {
+  const fixture = providerDrawerFixture();
+  const originalTrigger = new FakeElement();
+  originalTrigger.dataset.providerId = '1';
+  originalTrigger.isConnected = true;
+  const replacementTrigger = new FakeElement();
+  fixture.root.ownerDocument.querySelector = selector => selector === '.provider-detail-trigger[data-provider-id="1"]'
+    ? replacementTrigger
+    : null;
+  const drawer = createProviderDrawer(fixture.root);
+
+  drawer.open({id: 1, name: 'Provider Alpha', incidents: []}, originalTrigger);
+  originalTrigger.isConnected = false;
+  drawer.close();
+
+  assert.equal(originalTrigger.focusCount, 0);
+  assert.equal(replacementTrigger.focusCount, 1);
+});
+
 test('starts at 24h and range switching aborts the obsolete single request', async () => {
   const document = new FakeDashboardDocument();
   const window = new FakeDashboardWindow();
@@ -421,6 +492,57 @@ test('starts at 24h and range switching aborts the obsolete single request', asy
   assert.match(document.getElementById('summary').innerHTML, /Providers online/);
   assert.match(document.getElementById('provider-table-body').innerHTML, /Provider Alpha/);
   assert.match(document.getElementById('comparison').innerHTML, /99\.50%/);
+  dashboard.stop();
+});
+
+test('reverts the selected range when a range refresh fails and old data remains visible', async () => {
+  const document = new FakeDashboardDocument();
+  const window = new FakeDashboardWindow();
+  const requests = [];
+  const api = (path, options) => {
+    const request = deferredRequest(options.signal);
+    requests.push({path, request});
+    return request.promise;
+  };
+  const dashboard = startDashboard({api, document, window});
+  requests[0].request.resolve(dashboardPayload());
+  await dashboard.ready;
+  const renderedTable = document.getElementById('provider-table-body').innerHTML;
+
+  document.ranges[1].emit('click');
+  const rangeRefresh = dashboard.refresh();
+  requests[1].request.reject(new Error('temporarily unavailable'));
+  await rangeRefresh;
+
+  assert.equal(document.ranges[0].getAttribute('aria-pressed'), 'true');
+  assert.equal(document.ranges[1].getAttribute('aria-pressed'), 'false');
+  assert.equal(document.getElementById('provider-table-body').innerHTML, renderedTable);
+  dashboard.stop();
+});
+
+test('renders visible symbols in provider table status history', async () => {
+  const document = new FakeDashboardDocument();
+  const window = new FakeDashboardWindow();
+  const dashboard = startDashboard({
+    api: () => Promise.resolve(dashboardPayload({
+      providers: [{
+        ...dashboardPayload().providers[0],
+        series: [
+          {bucketStart: 1787317200, state: 'healthy'},
+          {bucketStart: 1787318100, state: 'outage'},
+        ],
+      }],
+    })),
+    document,
+    window,
+  });
+
+  await dashboard.ready;
+
+  const markup = document.getElementById('provider-table-body').innerHTML;
+  assert.equal((markup.match(/class="status-symbol"/g) || []).length, 2);
+  assert.match(markup, /<span class="status-symbol" aria-hidden="true">✓<\/span>/);
+  assert.match(markup, /<span class="status-symbol" aria-hidden="true">×<\/span>/);
   dashboard.stop();
 });
 
@@ -484,6 +606,9 @@ test('replaces initial loading regions with explicit unavailable states on failu
     assert.match(document.getElementById(id).innerHTML, /unavailable/i, `${id} did not leave its loading state`);
   }
   assert.match(document.getElementById('dashboard-status').innerHTML, /data-dashboard-retry/);
+  assert.equal(document.getElementById('latency-chart').getAttribute('role'), 'group');
+  assert.match(document.getElementById('latency-chart').getAttribute('aria-label'), /unavailable/i);
+  assert.doesNotMatch(document.getElementById('latency-chart').getAttribute('aria-label'), /loading/i);
   dashboard.stop();
 });
 

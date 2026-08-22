@@ -19,6 +19,7 @@ export function createProviderDrawer(root) {
   const state = root.querySelector('[data-drawer-state]');
   const incidentList = root.querySelector('.drawer-incident-list');
   let trigger = null;
+  let triggerSelector = null;
   let openState = false;
 
   function setValue(name, value) {
@@ -35,11 +36,22 @@ export function createProviderDrawer(root) {
     document?.body?.classList?.remove('drawer-open');
     const capturedTrigger = trigger;
     trigger = null;
-    capturedTrigger?.focus?.();
+    const replacementTrigger = capturedTrigger?.isConnected === false && triggerSelector
+      ? document?.querySelector?.(triggerSelector)
+      : null;
+    triggerSelector = null;
+    (replacementTrigger || capturedTrigger)?.focus?.();
   }
 
   function open(provider = {}, nextTrigger = null) {
     trigger = nextTrigger;
+    const providerID = Number(nextTrigger?.dataset?.providerId ?? provider?.id);
+    const bucketIndex = Number(nextTrigger?.dataset?.bucketIndex);
+    triggerSelector = Number.isFinite(providerID)
+      ? (nextTrigger?.dataset?.bucketIndex == null
+        ? `.provider-detail-trigger[data-provider-id="${providerID}"]`
+        : `.pulse-bucket[data-provider-id="${providerID}"][data-bucket-index="${bucketIndex}"]`)
+      : null;
     openState = true;
     const rawState = SAFE_STATES.has(provider.state) ? provider.state : 'unknown';
     if (title) title.textContent = provider.name || 'Provider';

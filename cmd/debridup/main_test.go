@@ -79,6 +79,56 @@ func TestDashboardAssetsContainResponsiveMonitorDialog(t *testing.T) {
 	}
 }
 
+func TestProviderDrawerLabelsTheLatestCheckAccurately(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(b)
+	if !strings.Contains(html, `<dt>Last check</dt>`) {
+		t.Fatal("provider drawer must label the API's lastCheck value as Last check")
+	}
+	if strings.Contains(html, `<dt>Last successful check</dt>`) {
+		t.Fatal("provider drawer must not describe lastCheck as successful")
+	}
+}
+
+func TestPulseStylesBoundMaximumHistoryWithoutColorOnlyMeaning(t *testing.T) {
+	b, err := webFS.ReadFile("web/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(b)
+	if !strings.Contains(css, `.pulse-track { display: grid; min-width: 0; max-width: 100%; overflow: hidden; grid-template-columns: repeat(var(--pulse-bucket-count, 1), minmax(0, 1fr));`) {
+		t.Fatal("pulse track must scale every server bucket inside its available width")
+	}
+	if strings.Count(css, "repeating-linear-gradient") < 4 {
+		t.Fatal("pulse states must use distinct visible patterns in addition to color")
+	}
+}
+
+func TestStatsResetsRefreshMonitorSettingsAndDashboard(t *testing.T) {
+	b, err := webFS.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := string(b)
+	perProviderStart := strings.Index(app, "$('#reset-monitor-stats').addEventListener")
+	globalStart := strings.Index(app, "$('#reset-all-stats').addEventListener")
+	notificationStart := strings.Index(app, "$('#ntfy-form').addEventListener")
+	if perProviderStart < 0 || globalStart <= perProviderStart || notificationStart <= globalStart {
+		t.Fatal("could not locate reset handlers")
+	}
+	for name, block := range map[string]string{
+		"per-provider reset": app[perProviderStart:globalStart],
+		"global reset":       app[globalStart:notificationStart],
+	} {
+		if !strings.Contains(block, "loadMonitorSettings()") || !strings.Contains(block, "dashboard.refresh({supersede: true})") {
+			t.Errorf("%s must refresh both monitor settings and dashboard data", name)
+		}
+	}
+}
+
 func TestSendNtfyReportsHTTPFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

@@ -195,7 +195,7 @@ $('#reset-monitor-stats').addEventListener('click', async () => {
     await api(`/api/monitors/${editingMonitorID}/reset`, {method: 'POST'});
     $('#monitor-dialog').close();
     resetMonitorDialog();
-    await dashboard.refresh({supersede: true});
+    await Promise.all([loadMonitorSettings(), dashboard.refresh({supersede: true})]);
   } catch (error) {
     $('#monitor-error').textContent = error.message;
   }
@@ -206,7 +206,7 @@ $('#reset-all-stats').addEventListener('click', async () => {
   button.disabled = true;
   try {
     await api('/api/stats/reset', {method: 'POST'});
-    await dashboard.refresh({supersede: true});
+    await Promise.all([loadMonitorSettings(), dashboard.refresh({supersede: true})]);
   } catch (error) {
     showManagementError(error);
   } finally {
