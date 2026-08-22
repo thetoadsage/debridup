@@ -16,6 +16,7 @@ import {createProviderDrawer} from './drawer.mjs';
 import {startDashboard} from './dashboard.mjs';
 import {applyTheme, normalizeTheme, setupThemePicker, storedTheme, THEMES} from './theme.mjs';
 import {AUTO_TIME_ZONE, formatTimestamp as formatInTimeZone, setupTimeZonePicker, timeZoneDescription} from './timezone.mjs';
+import {setupSectionNavigation} from './navigation.mjs';
 
 class FakeElement {
   constructor() {
@@ -61,6 +62,10 @@ class FakeElement {
 
   getAttribute(name) {
     return this.attributes.get(name) ?? null;
+  }
+
+  removeAttribute(name) {
+    this.attributes.delete(name);
   }
 
   focus() {
@@ -584,6 +589,56 @@ test('sidebar provider navigation targets the provider table before incidents', 
   const providers = markup.indexOf('id="providers-panel"');
   const incidents = markup.indexOf('id="incidents-panel"');
   assert.ok(providers >= 0 && incidents >= 0 && providers < incidents);
+});
+
+test('sidebar navigation follows clicks, hashes, and the visible section', () => {
+  const links = ['dashboard-main', 'providers-panel', 'incidents-panel', 'notification-settings'].map(id => {
+    const link = new FakeElement();
+    link.setAttribute('href', `#${id}`);
+    return link;
+  });
+  const positions = {
+    'dashboard-main': 0,
+    'providers-panel': 360,
+    'incidents-panel': 780,
+    'notification-settings': 1180,
+  };
+  const sections = Object.fromEntries(Object.keys(positions).map(id => [id, {
+    getBoundingClientRect: () => ({top: positions[id]}),
+  }]));
+  const listeners = new Map();
+  const navigationDocument = {
+    getElementById: id => sections[id] || null,
+    querySelectorAll: selector => selector === '.nav-link[href^="#"]' ? links : [],
+  };
+  const navigationWindow = {
+    innerWidth: 1280,
+    location: {hash: ''},
+    addEventListener: (type, listener) => listeners.set(type, listener),
+    removeEventListener: type => listeners.delete(type),
+  };
+
+  const navigation = setupSectionNavigation({document: navigationDocument, window: navigationWindow});
+  assert.equal(links[0].getAttribute('aria-current'), 'page');
+
+  links[1].emit('click');
+  assert.equal(links[1].getAttribute('aria-current'), 'page');
+  assert.equal(links[0].getAttribute('aria-current'), null);
+
+  positions['dashboard-main'] = -700;
+  positions['providers-panel'] = -180;
+  positions['incidents-panel'] = 36;
+  listeners.get('scroll')();
+  assert.equal(links[1].getAttribute('aria-current'), 'page');
+
+  positions['incidents-panel'] = -20;
+  listeners.get('scroll')();
+  assert.equal(links[2].getAttribute('aria-current'), 'page');
+
+  navigationWindow.location.hash = '#notification-settings';
+  listeners.get('hashchange')();
+  assert.equal(links[3].getAttribute('aria-current'), 'page');
+  navigation.stop();
 });
 
 test('offers four named themes and falls back safely to graphite', () => {
