@@ -1,0 +1,77 @@
+name: Verify
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_call:
+    secrets:
+      PRIVATE_PATTERNS:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+      CHANGE_TEXT: |
+        ${{ github.event.pull_request.title }}
+        ${{ github.event.pull_request.body }}
+      PRIVATE_PATTERNS: ${{ secrets.PRIVATE_PATTERNS }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.24.x"
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Verify Go formatting
+        shell: sh
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+
+      - name: Run Go tests
+        run: go test ./...
+
+      - name: Run race-enabled Go tests
+        run: go test -race ./...
+
+      - name: Run Go static analysis
+        run: go vet ./...
+
+      - name: Run browser module tests
+        run: node --test cmd/debridup/web/dashboard-model.test.mjs
+
+      - name: Install vulnerability scanner
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+
+      - name: Scan Go dependencies
+        run: govulncheck ./...
+
+      - name: Build container image
+        run: docker build -t debridup:test .
+
+      - name: Install image metadata scanner
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libimage-exiftool-perl
+
+      - name: Check release safety
+        run: sh scripts/check-release-safety.sh "$BASE_SHA"

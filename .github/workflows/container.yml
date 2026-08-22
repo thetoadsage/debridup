@@ -17,8 +17,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  verify:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/test.yml
+    secrets: inherit
+
   publish:
+    needs: verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
