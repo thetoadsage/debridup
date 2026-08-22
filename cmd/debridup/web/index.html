@@ -211,6 +211,27 @@
             <p id="ntfy-detail" class="muted">Add a topic URL to configure this channel.</p>
           </div>
         </div>
+        <div class="time-zone-setting">
+          <div>
+            <strong>Display time zone</strong>
+            <p id="time-zone-detail" class="muted"></p>
+          </div>
+          <label>
+            <span class="sr-only">Display time zone</span>
+            <select id="time-zone">
+              <option value="browser">Browser local time</option>
+              <option value="UTC">UTC</option>
+              <option value="America/New_York">Eastern time</option>
+              <option value="America/Chicago">Central time</option>
+              <option value="America/Denver">Mountain time</option>
+              <option value="America/Los_Angeles">Pacific time</option>
+              <option value="Europe/London">London</option>
+              <option value="Europe/Paris">Central European time</option>
+              <option value="Asia/Tokyo">Tokyo</option>
+              <option value="Australia/Sydney">Sydney</option>
+            </select>
+          </label>
+        </div>
         <form id="ntfy-form" class="form compact">
           <label>
             <span id="ntfy-url-label">Topic URL</span>

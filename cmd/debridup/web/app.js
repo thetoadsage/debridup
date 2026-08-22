@@ -1,6 +1,7 @@
 import {startDashboard} from './dashboard.mjs';
-import {escapeHTML, formatState, formatTimestamp} from './dashboard-model.mjs';
+import {escapeHTML, formatState} from './dashboard-model.mjs';
 import {setupThemePicker} from './theme.mjs';
+import {formatTimestamp, setupTimeZonePicker} from './timezone.mjs';
 
 const $ = selector => document.querySelector(selector);
 const SAFE_STATES = new Set(['healthy', 'auth_failed', 'api_issue', 'connection_issue', 'checking', 'unknown']);
@@ -22,6 +23,15 @@ const providerDetails = {
 };
 
 setupThemePicker({document, storage: window.localStorage});
+let dashboard;
+const timeZonePicker = setupTimeZonePicker({
+  document,
+  storage: window.localStorage,
+  onChange: timeZone => {
+    renderMonitorSettings(Array.from(monitorConfigs.values()));
+    dashboard?.setTimeZone(timeZone);
+  },
+});
 
 function stateClass(value) {
   return SAFE_STATES.has(value) ? value : 'unknown';
@@ -67,7 +77,7 @@ function renderMonitorSettings(monitors) {
   $('#cards').innerHTML = items.length ? items.map(monitor => {
     const state = stateClass(monitor.state);
     const providerName = providerDetails[monitor.provider]?.name || monitor.provider;
-    return `<article class="card"><div class="section-title"><div><p class="provider-name">${escapeHTML(monitor.name)}</p><span class="provider">${escapeHTML(providerName)}</span></div><div class="card-status"><span class="state ${state}">${escapeHTML(formatState(monitor.state))}</span><button type="button" class="quiet edit-monitor" data-monitor-id="${Number(monitor.id) || 0}">Edit settings</button></div></div><div class="metric-grid"><div class="metric"><strong>${Number(monitor.intervalSeconds) || 0}s</strong><span>Check interval</span></div><div class="metric"><strong>${Number(monitor.timeoutSeconds) || 0}s</strong><span>Timeout</span></div><div class="metric"><strong>${Number(monitor.failureThreshold) || 0}</strong><span>Failure confirmations</span></div><div class="metric"><strong>${escapeHTML(formatTimestamp(monitor.lastCheck))}</strong><span>Last check</span></div></div></article>`;
+    return `<article class="card"><div class="section-title"><div><p class="provider-name">${escapeHTML(monitor.name)}</p><span class="provider">${escapeHTML(providerName)}</span></div><div class="card-status"><span class="state ${state}">${escapeHTML(formatState(monitor.state))}</span><button type="button" class="quiet edit-monitor" data-monitor-id="${Number(monitor.id) || 0}">Edit settings</button></div></div><div class="metric-grid"><div class="metric"><strong>${Number(monitor.intervalSeconds) || 0}s</strong><span>Check interval</span></div><div class="metric"><strong>${Number(monitor.timeoutSeconds) || 0}s</strong><span>Timeout</span></div><div class="metric"><strong>${Number(monitor.failureThreshold) || 0}</strong><span>Failure confirmations</span></div><div class="metric"><strong>${escapeHTML(formatTimestamp(monitor.lastCheck, timeZonePicker.timeZone))}</strong><span>Last check</span></div></div></article>`;
   }).join('') : '<article class="card"><p>No providers configured. Add a provider to begin monitoring.</p></article>';
   document.querySelectorAll('.edit-monitor').forEach(button => button.addEventListener('click', () => openEditMonitor(monitorConfigs.get(Number(button.dataset.monitorId)))));
 }
@@ -135,7 +145,7 @@ function showManagementError(error) {
   $('#cards').innerHTML = '<article class="card"><p class="error">Unable to load provider settings. Refresh the page to retry.</p></article>';
 }
 
-const dashboard = startDashboard({api, document, window});
+dashboard = startDashboard({api, document, window, timeZone: timeZonePicker.timeZone});
 
 $('#logout').addEventListener('click', async () => {
   await fetch('/logout', {method: 'POST'});

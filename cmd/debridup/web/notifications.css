@@ -6,6 +6,11 @@
 .channel-summary { display: flex; gap: 12px; align-items: center; margin: 20px 0 4px; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-inset); }
 .channel-summary p { margin: 2px 0 0; font-size: 12px; }
 .channel-icon { width: 34px; height: 34px; flex: 0 0 34px; display: grid; place-items: center; border-radius: 9px; background: var(--surface-raised); color: var(--accent); font-weight: 900; }
+.time-zone-setting { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 16px 0 4px; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-inset); }
+.time-zone-setting strong { font-size: 13px; }
+.time-zone-setting .muted { margin: 2px 0 0; font-size: 12px; }
+.time-zone-setting label { display: block; min-width: 180px; }
+.time-zone-setting select { width: 100%; padding: 8px 9px; font-size: 12px; }
 .form small { color: var(--muted); font-size: 11px; }
 .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 13px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .toggle-row span { display: grid; gap: 2px; }
@@ -17,3 +22,8 @@
 .channel-message { min-height: 21px; margin: 0; color: var(--muted); font-size: 13px; }
 .channel-message.success { color: var(--green); }
 .channel-message.error { color: var(--red); }
+
+@media (max-width: 560px) {
+  .time-zone-setting { align-items: stretch; flex-direction: column; }
+  .time-zone-setting label { min-width: 0; }
+}

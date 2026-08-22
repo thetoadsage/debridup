@@ -80,7 +80,7 @@ function setLatencyAccessibility(element, label) {
   element.setAttribute('aria-label', label);
 }
 
-export function startDashboard({api, document, window}) {
+export function startDashboard({api, document, window, timeZone} = {}) {
   if (typeof api !== 'function') throw new Error('dashboard api function is required');
   if (!document || !window) throw new Error('dashboard document and window are required');
 
@@ -102,6 +102,7 @@ export function startDashboard({api, document, window}) {
   let stopped = false;
   let lastPayload = null;
   let model = null;
+  let displayTimeZone = timeZone;
 
   function now() {
     return window.Date?.now?.() ?? Date.now();
@@ -132,10 +133,10 @@ export function startDashboard({api, document, window}) {
   function renderModel(nextModel) {
     model = nextModel;
     renderSummary(summary, model);
-    if (pulse) pulse.innerHTML = renderPulse(model.providers);
+    if (pulse) pulse.innerHTML = renderPulse(model.providers, displayTimeZone);
     renderProviderTable(providerTable, model.providers);
     if (latency) {
-      latency.innerHTML = renderLatencyChart(model.providers);
+      latency.innerHTML = renderLatencyChart(model.providers, displayTimeZone);
       setLatencyAccessibility(latency, 'Provider latency comparison and text summary');
     }
     renderIncidents(incidents, model.incidents);
@@ -163,7 +164,7 @@ export function startDashboard({api, document, window}) {
         range = lastPayload.range;
         updateRangeButtons();
       }
-      renderModel(createDashboardModel(lastPayload, now()));
+      renderModel(createDashboardModel(lastPayload, now(), displayTimeZone));
       status.innerHTML = `Unable to refresh. Showing data from ${escapeHTML(model.ageLabel)} ago. <button class="status-retry" type="button" data-dashboard-retry>Retry</button>`;
     } else {
       if (summary) summary.innerHTML = '<h2 id="summary-heading" class="sr-only">Current status summary</h2><article class="summary-card"><span class="summary-label">Overall status</span><strong class="summary-value summary-state unknown">Unavailable</strong></article><article class="summary-card"><span class="summary-label">Providers online</span><strong class="summary-value">—</strong></article><article class="summary-card"><span class="summary-label">Active incidents</span><strong class="summary-value">—</strong></article><article class="summary-card"><span class="summary-label">Checks completed today</span><strong class="summary-value">—</strong></article>';
@@ -209,7 +210,7 @@ export function startDashboard({api, document, window}) {
           range = lastPayload.range;
           updateRangeButtons();
         }
-        renderModel(createDashboardModel(lastPayload, now()));
+        renderModel(createDashboardModel(lastPayload, now(), displayTimeZone));
         renderSuccessStatus();
         return model;
       })
@@ -260,6 +261,13 @@ export function startDashboard({api, document, window}) {
     void refresh({supersede: true});
   }
 
+  function setTimeZone(value) {
+    displayTimeZone = value;
+    if (!lastPayload) return;
+    renderModel(createDashboardModel(lastPayload, now(), displayTimeZone));
+    renderSuccessStatus();
+  }
+
   updateRangeButtons();
   for (const button of rangeButtons) button.addEventListener('click', selectRange);
   refreshButton?.addEventListener('click', manualRefresh);
@@ -283,5 +291,5 @@ export function startDashboard({api, document, window}) {
     drawer?.destroy();
   }
 
-  return {ready, refresh, stop};
+  return {ready, refresh, setTimeZone, stop};
 }

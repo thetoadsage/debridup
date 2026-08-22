@@ -1,4 +1,5 @@
 import {escapeHTML, formatLatency, formatPercentage} from './dashboard-model.mjs';
+import {formatTimestamp} from './timezone.mjs';
 
 const CHART_COLORS = ['#56a9ff', '#35d19d', '#ffbe58', '#ff7182', '#a78bfa', '#22d3ee'];
 const PULSE_STATES = new Set(['healthy', 'degraded', 'outage', 'unknown']);
@@ -9,9 +10,9 @@ function stateLabel(value) {
   return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 }
 
-function bucketTime(value) {
+function bucketTime(value, timeZone) {
   if (!Number.isFinite(value)) return 'unknown time';
-  return new Date(value * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC');
+  return formatTimestamp(value, timeZone);
 }
 
 function measuredPoints(provider) {
@@ -19,7 +20,7 @@ function measuredPoints(provider) {
     .filter(point => Number.isFinite(point?.bucketStart) && Number.isFinite(point?.p95Ms));
 }
 
-export function renderPulse(providers) {
+export function renderPulse(providers, timeZone) {
   const heading = '<div class="section-title"><div><h2 id="pulse-heading">Provider pulse</h2><p class="muted">Health changes across the selected range.</p></div><span class="status-key"><span><b class="status-key-symbol healthy" aria-hidden="true">✓</b>Healthy</span><span><b class="status-key-symbol degraded" aria-hidden="true">!</b>Degraded</span><span><b class="status-key-symbol outage" aria-hidden="true">×</b>Outage</span><span><b class="status-key-symbol unknown" aria-hidden="true">?</b>No data</span></span></div>';
   const rows = (Array.isArray(providers) ? providers : []).map(provider => {
     const name = escapeHTML(provider?.name || 'Unnamed provider');
@@ -28,7 +29,7 @@ export function renderPulse(providers) {
       const rawState = PULSE_STATES.has(point?.state) ? point.state : 'unknown';
       const label = [
         `${name}: ${stateLabel(rawState)}`,
-        bucketTime(point?.bucketStart),
+        bucketTime(point?.bucketStart, timeZone),
         `${formatPercentage(point?.availability)} availability`,
         `p95 ${formatLatency(point?.p95Ms)}`,
       ].join(', ');
@@ -43,7 +44,7 @@ export function renderPulse(providers) {
     : `${heading}<div class="dashboard-empty"><p>No providers configured.</p><a href="#provider-management">Add a provider to begin monitoring.</a></div>`;
 }
 
-export function renderLatencyChart(providers) {
+export function renderLatencyChart(providers, timeZone) {
   const plottedProviders = (Array.isArray(providers) ? providers : [])
     .map(provider => ({provider, points: measuredPoints(provider)}))
     .filter(item => item.points.length > 0);
@@ -73,9 +74,9 @@ export function renderLatencyChart(providers) {
     const path = item.points.map((point, pointIndex) => `${pointIndex === 0 ? 'M' : 'L'} ${x(point.bucketStart).toFixed(2)} ${y(point.p95Ms).toFixed(2)}`).join(' ');
     return `<path class="latency-series" data-provider-id="${Number(item.provider?.id) || 0}" d="${path}" fill="none" stroke="${CHART_COLORS[index % CHART_COLORS.length]}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"></path>`;
   }).join('');
-  const markers = plottedProviders.map((item, index) => item.points.map(point => `<circle class="latency-point" cx="${x(point.bucketStart).toFixed(2)}" cy="${y(point.p95Ms).toFixed(2)}" r="3.5" fill="${CHART_COLORS[index % CHART_COLORS.length]}"><title>${escapeHTML(item.provider?.name || 'Unnamed provider')}, ${escapeHTML(bucketTime(point.bucketStart))}, ${formatLatency(point.p95Ms)}</title></circle>`).join('')).join('');
+  const markers = plottedProviders.map((item, index) => item.points.map(point => `<circle class="latency-point" cx="${x(point.bucketStart).toFixed(2)}" cy="${y(point.p95Ms).toFixed(2)}" r="3.5" fill="${CHART_COLORS[index % CHART_COLORS.length]}"><title>${escapeHTML(item.provider?.name || 'Unnamed provider')}, ${escapeHTML(bucketTime(point.bucketStart, timeZone))}, ${formatLatency(point.p95Ms)}</title></circle>`).join('')).join('');
   const legend = plottedProviders.map((item, index) => `<li><span class="legend-line" style="background:${CHART_COLORS[index % CHART_COLORS.length]}"></span>${escapeHTML(item.provider?.name || 'Unnamed provider')} <span>p95</span></li>`).join('');
   const summaries = plottedProviders.map(item => `<tr><th scope="row">${escapeHTML(item.provider?.name || 'Unnamed provider')}</th><td>${item.points.length}</td><td>${formatLatency(item.provider?.p50Ms)}</td><td>${formatLatency(item.provider?.p95Ms)}</td></tr>`).join('');
 
-  return `<div class="latency-visual"><svg class="latency-svg" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="latency-svg-title latency-svg-description"><title id="latency-svg-title">Provider p95 latency comparison</title><desc id="latency-svg-description">Latency in milliseconds for each provider across the selected range. Exact values follow in a table.</desc><g class="latency-axes">${axes}<line x1="${inset.left}" y1="${inset.top}" x2="${inset.left}" y2="${height - inset.bottom}"></line><line x1="${inset.left}" y1="${height - inset.bottom}" x2="${width - inset.right}" y2="${height - inset.bottom}"></line><text x="${inset.left}" y="${height - 14}" text-anchor="start">${escapeHTML(bucketTime(firstBucket))}</text><text x="${width - inset.right}" y="${height - 14}" text-anchor="end">${escapeHTML(bucketTime(lastBucket))}</text></g>${paths}${markers}</svg><ul class="chart-legend" aria-label="Latency chart legend">${legend}</ul></div><div class="table-scroll chart-table-scroll"><table class="chart-summary"><caption>Latency summary for the selected range</caption><thead><tr><th scope="col">Provider</th><th scope="col">Measured points</th><th scope="col">p50</th><th scope="col">p95</th></tr></thead><tbody>${summaries}</tbody></table></div>`;
+  return `<div class="latency-visual"><svg class="latency-svg" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="latency-svg-title latency-svg-description"><title id="latency-svg-title">Provider p95 latency comparison</title><desc id="latency-svg-description">Latency in milliseconds for each provider across the selected range. Exact values follow in a table.</desc><g class="latency-axes">${axes}<line x1="${inset.left}" y1="${inset.top}" x2="${inset.left}" y2="${height - inset.bottom}"></line><line x1="${inset.left}" y1="${height - inset.bottom}" x2="${width - inset.right}" y2="${height - inset.bottom}"></line><text x="${inset.left}" y="${height - 14}" text-anchor="start">${escapeHTML(bucketTime(firstBucket, timeZone))}</text><text x="${width - inset.right}" y="${height - 14}" text-anchor="end">${escapeHTML(bucketTime(lastBucket, timeZone))}</text></g>${paths}${markers}</svg><ul class="chart-legend" aria-label="Latency chart legend">${legend}</ul></div><div class="table-scroll chart-table-scroll"><table class="chart-summary"><caption>Latency summary for the selected range</caption><thead><tr><th scope="col">Provider</th><th scope="col">Measured points</th><th scope="col">p50</th><th scope="col">p95</th></tr></thead><tbody>${summaries}</tbody></table></div>`;
 }

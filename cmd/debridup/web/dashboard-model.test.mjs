@@ -15,6 +15,7 @@ import {renderLatencyChart, renderPulse} from './chart.mjs';
 import {createProviderDrawer} from './drawer.mjs';
 import {startDashboard} from './dashboard.mjs';
 import {applyTheme, normalizeTheme, setupThemePicker, storedTheme, THEMES} from './theme.mjs';
+import {AUTO_TIME_ZONE, formatTimestamp as formatInTimeZone, setupTimeZonePicker, timeZoneDescription} from './timezone.mjs';
 
 class FakeElement {
   constructor() {
@@ -264,11 +265,12 @@ test('escapes every HTML-sensitive character in one centralized helper', () => {
   );
 });
 
-test('formats deterministic state, duration, and UTC timestamp labels', () => {
+test('formats deterministic state, duration, and explicitly selected timestamp labels', () => {
   assert.equal(formatState('connection_issue'), 'Connection issue');
   assert.equal(formatDuration(3660), '1 hour 1 minute');
-  assert.equal(formatTimestamp(1787320800), 'Aug 21, 2026, 2:00 PM UTC');
-  assert.equal(formatTimestamp(null), 'No checks yet');
+  assert.equal(formatTimestamp(1787320800, 'UTC'), 'Aug 21, 2026, 2:00 PM UTC');
+  assert.equal(formatTimestamp(1787320800, 'America/Chicago'), 'Aug 21, 2026, 9:00 AM CDT');
+  assert.equal(formatTimestamp(null, 'UTC'), 'No checks yet');
 });
 
 test('derives provider labels and state age from the injected clock', () => {
@@ -285,7 +287,7 @@ test('derives provider labels and state age from the injected clock', () => {
       p95Ms: null,
       slowestMs: 420,
     }],
-  }, 1787320800000);
+  }, 1787320800000, 'UTC');
 
   assert.equal(model.providers[0].stateLabel, 'Connection issue');
   assert.equal(model.providers[0].stateDurationLabel, '1 hour');
@@ -623,6 +625,32 @@ test('theme application rejects unknown values', () => {
   const document = {documentElement: {dataset: {}}};
   assert.equal(applyTheme(document, 'unknown'), 'graphite');
   assert.equal(document.documentElement.dataset.theme, 'graphite');
+});
+
+test('time-zone picker defaults to browser time and persists an explicit selection', () => {
+  const picker = new FakeElement();
+  const detail = new FakeElement();
+  const document = {
+    getElementById: id => id === 'time-zone' ? picker : id === 'time-zone-detail' ? detail : null,
+  };
+  const values = new Map();
+  const storage = {
+    getItem: key => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+  };
+  const changed = [];
+
+  const controller = setupTimeZonePicker({document, storage, onChange: value => changed.push(value)});
+  assert.equal(controller.timeZone, AUTO_TIME_ZONE);
+  assert.match(detail.textContent, /browser’s local time/);
+
+  picker.value = 'America/Chicago';
+  picker.emit('change');
+  assert.equal(controller.timeZone, 'America/Chicago');
+  assert.equal(values.get('debridup-time-zone'), 'America/Chicago');
+  assert.deepEqual(changed, ['America/Chicago']);
+  assert.equal(timeZoneDescription('America/Chicago'), 'Using America/Chicago.');
+  assert.equal(formatInTimeZone(1787320800, controller.timeZone), 'Aug 21, 2026, 9:00 AM CDT');
 });
 
 test('keeps the last successful model on failure and renders its age with retry', async () => {

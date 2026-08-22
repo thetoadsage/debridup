@@ -5,6 +5,10 @@ const EMPTY_SUMMARY = Object.freeze({
   checksToday: 0,
 });
 
+import {formatTimestamp} from './timezone.mjs';
+
+export {formatTimestamp} from './timezone.mjs';
+
 const ESCAPED_CHARACTERS = Object.freeze({
   '&': '&amp;',
   '<': '&lt;',
@@ -56,25 +60,11 @@ export function formatDuration(value) {
   return parts.join(' ');
 }
 
-export function formatTimestamp(value) {
-  if (!isNumber(value)) return 'No checks yet';
-  const formatted = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'UTC',
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-  }).format(new Date(value * 1000));
-  return `${formatted} UTC`;
-}
-
 export function escapeHTML(value) {
   return String(value ?? '').replace(/[&<>"']/g, character => ESCAPED_CHARACTERS[character]);
 }
 
-export function createDashboardModel(payload = {}, now = Date.now()) {
+export function createDashboardModel(payload = {}, now = Date.now(), timeZone) {
   const nowSeconds = Math.floor(now / 1000);
   const generatedAt = isNumber(payload.generatedAt) ? payload.generatedAt : 0;
   const ageSeconds = generatedAt > 0
@@ -83,8 +73,8 @@ export function createDashboardModel(payload = {}, now = Date.now()) {
   const incidents = asArray(payload.incidents).map(incident => ({
     ...incident,
     stateLabel: formatState(incident?.latestState),
-    openedAtLabel: formatTimestamp(incident?.openedAt),
-    resolvedAtLabel: isNumber(incident?.resolvedAt) ? formatTimestamp(incident.resolvedAt) : 'Ongoing',
+    openedAtLabel: formatTimestamp(incident?.openedAt, timeZone),
+    resolvedAtLabel: isNumber(incident?.resolvedAt) ? formatTimestamp(incident.resolvedAt, timeZone) : 'Ongoing',
   }));
   const providers = asArray(payload.providers).map(provider => {
     const providerIncidents = incidents.filter(incident => incident.monitorId === provider?.id);
@@ -94,7 +84,7 @@ export function createDashboardModel(payload = {}, now = Date.now()) {
       stateDurationLabel: isNumber(provider?.stateSince)
         ? formatDuration(nowSeconds - provider.stateSince)
         : '—',
-      lastCheckLabel: formatTimestamp(provider?.lastCheck),
+      lastCheckLabel: formatTimestamp(provider?.lastCheck, timeZone),
       availabilityLabel: formatPercentage(provider?.availability),
       p50Label: formatLatency(provider?.p50Ms),
       p95Label: formatLatency(provider?.p95Ms),
@@ -114,7 +104,7 @@ export function createDashboardModel(payload = {}, now = Date.now()) {
     incidents,
     ageSeconds,
     ageLabel: formatDuration(ageSeconds),
-    updatedLabel: generatedAt > 0 ? formatTimestamp(generatedAt) : 'Update unavailable',
+    updatedLabel: generatedAt > 0 ? formatTimestamp(generatedAt, timeZone) : 'Update unavailable',
     stale: ageSeconds > 90,
   };
 }
