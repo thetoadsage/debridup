@@ -93,8 +93,11 @@ octet='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
 } > "$general_patterns"
 
 credential_name='(password|passwd|token|api[_-]?key|apikey|client[_-]?secret|access[_-]?key|secret)'
+single_quote="$(printf '\047')"
 {
 	printf '^[[:space:]]*(export[[:space:]]+)?[[:alnum:]_.-]*%s[[:alnum:]_.-]*=[[:space:]]*[^$<{[:space:]][^[:space:]]*[[:space:]]*$\n' "$credential_name"
+	printf '(^|[,{[:space:]])("|%s)?[[:alnum:]_.-]*%s[[:alnum:]_.-]*("|%s)?[[:space:]]*(:=|=|:)[[:space:]]*("|%s)[^"%s]+("|%s)' "$single_quote" "$credential_name" "$single_quote" "$single_quote" "$single_quote" "$single_quote"
+	printf '\n'
 } > "$credential_patterns"
 
 marker_one="$(printf '\143\157\144\145\170')"
@@ -117,26 +120,26 @@ scan_source() {
 	source_file=$1
 	source_name=$2
 
-	if grep -Eiq -f "$general_patterns" "$source_file"; then
+	if grep -aEiq -f "$general_patterns" "$source_file"; then
 		reject_source "$source_name" 'private network, local path, or key metadata'
 	fi
 
-	if grep -Fiq -f "$marker_patterns" "$source_file"; then
+	if grep -aFiq -f "$marker_patterns" "$source_file"; then
 		reject_source "$source_name" 'prohibited attribution'
 	fi
 
-	if [ -s "$private_patterns" ] && grep -Fq -f "$private_patterns" "$source_file"; then
+	if [ -s "$private_patterns" ] && grep -aFq -f "$private_patterns" "$source_file"; then
 		reject_source "$source_name" 'a configured private pattern'
 	fi
 
 	: > "$credential_matches"
-	grep -Ei -f "$credential_patterns" "$source_file" > "$credential_matches" || true
+	grep -aEi -f "$credential_patterns" "$source_file" > "$credential_matches" || true
 	if [ -s "$credential_matches" ] && grep -Eiv '=[[:space:]]*"?(replace([-_]with)?|change([-_]?me)?|example|placeholder|dummy)([-_.[:alnum:]]*)"?[[:space:]]*$' "$credential_matches" >/dev/null; then
 		reject_source "$source_name" 'a credential assignment'
 	fi
 
 	: > "$email_matches"
-	grep -Eio '[[:alnum:]._%+-]+@[[:alnum:].-]+\.[[:alpha:]]{2,}' "$source_file" > "$email_matches" || true
+	grep -aEio '[[:alnum:]._%+-]+@[[:alnum:].-]+\.[[:alpha:]]{2,}' "$source_file" > "$email_matches" || true
 	if [ -s "$email_matches" ] && grep -Eiv '^(noreply@github\.com|[[:alnum:]._%+-]+@users\.noreply\.github\.com)$' "$email_matches" >/dev/null; then
 		reject_source "$source_name" 'an ordinary email address'
 	fi
@@ -144,16 +147,38 @@ scan_source() {
 
 tracked_paths="$scan_root/tracked-paths"
 tracked_content="$scan_root/tracked-content"
-git ls-files -z > "$tracked_paths"
+if ! git ls-files -z > "$tracked_paths"; then
+	printf '%s\n' 'release-safety scan could not enumerate tracked paths' >&2
+	exit 2
+fi
+scan_source "$tracked_paths" 'tracked and staged filenames'
 : > "$tracked_content"
 if [ -s "$tracked_paths" ]; then
-	xargs -0 grep -I -h -e '' -- < "$tracked_paths" > "$tracked_content" 2>/dev/null || true
+	worktree_status=0
+	xargs -0 sh -c '
+		for path do
+			if [ -L "$path" ]; then
+				readlink -- "$path" || exit 1
+			elif [ -f "$path" ]; then
+				cat -- "$path" || exit 1
+			elif [ -e "$path" ]; then
+				exit 1
+			else
+				continue
+			fi
+			printf "\\000"
+		done
+	' sh < "$tracked_paths" > "$tracked_content" || worktree_status=$?
+	if [ "$worktree_status" -ne 0 ]; then
+		printf '%s\n' 'release-safety scan could not inspect tracked working-tree bytes' >&2
+		exit 2
+	fi
 fi
 scan_source "$tracked_content" 'tracked working-tree content'
 
 staged_content="$scan_root/staged-content"
 staged_status=0
-git grep --cached -I -h -e '' -- . > "$staged_content" || staged_status=$?
+git grep --cached -a -h -e '' -- . > "$staged_content" || staged_status=$?
 case "$staged_status" in
 	0|1) ;;
 	*)
@@ -163,41 +188,95 @@ case "$staged_status" in
 esac
 scan_source "$staged_content" 'staged content'
 
-if [ -n "$base_ref" ]; then
-	commit_content="$scan_root/commit-content"
-	case "$base_ref" in
-		*[!0]*)
-			if ! git rev-parse --verify "$base_ref^{commit}" >/dev/null 2>&1; then
-				printf '%s\n' 'release-safety scan could not resolve the base reference' >&2
-				exit 2
-			fi
-			git log --format='%s%n%b' "$base_ref..HEAD" -- > "$commit_content"
-			;;
-		*)
-			git log --format='%s%n%b' HEAD -- > "$commit_content"
-			;;
-	esac
-	scan_source "$commit_content" 'commit messages'
+index_entries="$scan_root/index-entries"
+index_objects="$scan_root/index-objects"
+index_content="$scan_root/index-content"
+if ! git ls-files -s -z > "$index_entries"; then
+	printf '%s\n' 'release-safety scan could not enumerate index objects' >&2
+	exit 2
 fi
+if ! perl -0ne 'chomp; if (/\A([0-9]+) ([0-9a-f]{40,64}) ([0-3])\t/s) { print "$2\n" if $1 ne "160000" } else { exit 2 }' < "$index_entries" > "$index_objects"; then
+	printf '%s\n' 'release-safety scan could not parse index objects' >&2
+	exit 2
+fi
+: > "$index_content"
+if [ -s "$index_objects" ] && ! git cat-file --batch < "$index_objects" > "$index_content"; then
+	printf '%s\n' 'release-safety scan could not inspect index blob bytes' >&2
+	exit 2
+fi
+scan_source "$index_content" 'staged index blob content'
+
+commit_content="$scan_root/commit-content"
+commit_range=HEAD
+case "$base_ref" in
+	'') ;;
+	*[!0]*)
+		if git rev-parse --verify "$base_ref^{commit}" >/dev/null 2>&1; then
+			commit_range="$base_ref..HEAD"
+		fi
+		;;
+	*) ;;
+esac
+if ! git log --format='%an%n%ae%n%cn%n%ce%n%s%n%b' "$commit_range" -- > "$commit_content"; then
+	printf '%s\n' 'release-safety scan could not inspect commit metadata' >&2
+	exit 2
+fi
+scan_source "$commit_content" 'commit metadata'
 
 change_content="$scan_root/change-content"
 printf '%s' "${CHANGE_TEXT:-}" > "$change_content"
 scan_source "$change_content" 'proposed change text'
 
-image_paths="$scan_root/image-paths"
-git ls-files -z -- '*.avif' '*.AVIF' '*.gif' '*.GIF' '*.jpg' '*.JPG' '*.jpeg' '*.JPEG' '*.png' '*.PNG' '*.tif' '*.TIF' '*.tiff' '*.TIFF' '*.webp' '*.WEBP' > "$image_paths"
-if [ -s "$image_paths" ]; then
+scan_image_metadata() {
+	image_paths=$1
+	image_name=$2
+	image_metadata=$3
+	if [ ! -s "$image_paths" ]; then
+		return
+	fi
 	if ! command -v exiftool >/dev/null 2>&1; then
 		printf '%s\n' 'release-safety scan requires exiftool for tracked images' >&2
 		exit 2
 	fi
-	image_metadata="$scan_root/image-metadata"
 	if ! xargs -0 exiftool -json -- < "$image_paths" > "$image_metadata" 2>/dev/null; then
-		printf '%s\n' 'release-safety scan could not inspect tracked image metadata' >&2
+		printf '%s\n' 'release-safety scan could not inspect image metadata' >&2
 		exit 2
 	fi
-	scan_source "$image_metadata" 'tracked image metadata'
+	scan_source "$image_metadata" "$image_name"
+}
+
+worktree_image_paths="$scan_root/worktree-image-paths"
+if ! perl -0ne 'chomp; print "$_\0" if /\.(?:avif|gif|jpe?g|png|tiff?|webp)\z/i' < "$tracked_paths" > "$worktree_image_paths"; then
+	printf '%s\n' 'release-safety scan could not enumerate worktree images' >&2
+	exit 2
 fi
+scan_image_metadata "$worktree_image_paths" 'tracked worktree image metadata' "$scan_root/worktree-image-metadata"
+
+index_image_pairs="$scan_root/index-image-pairs"
+if ! perl -0ne 'chomp; if (/\A([0-9]+) ([0-9a-f]{40,64}) ([0-3])\t(.*)\z/s) { my ($mode, $sha, $path) = ($1, $2, $4); print "$sha\0$path\0" if $mode ne "160000" && $path =~ /\.(?:avif|gif|jpe?g|png|tiff?|webp)\z/i } else { exit 2 }' < "$index_entries" > "$index_image_pairs"; then
+	printf '%s\n' 'release-safety scan could not enumerate index images' >&2
+	exit 2
+fi
+index_image_dir="$scan_root/index-images"
+index_image_paths="$scan_root/index-image-paths"
+mkdir "$index_image_dir"
+: > "$index_image_paths"
+if [ -s "$index_image_pairs" ]; then
+	index_image_status=0
+	RELEASE_SAFETY_IMAGE_DIR="$index_image_dir" xargs -0 -n 2 sh -c '
+		sha=$0
+		path=$1
+		extension=${path##*.}
+		output="$RELEASE_SAFETY_IMAGE_DIR/$sha.$extension"
+		git cat-file blob "$sha" > "$output" || exit 1
+		printf "%s\\000" "$output"
+	' < "$index_image_pairs" > "$index_image_paths" || index_image_status=$?
+	if [ "$index_image_status" -ne 0 ]; then
+		printf '%s\n' 'release-safety scan could not export index images' >&2
+		exit 2
+	fi
+fi
+scan_image_metadata "$index_image_paths" 'staged index image metadata' "$scan_root/index-image-metadata"
 
 if [ "$scan_failed" -ne 0 ]; then
 	exit 1

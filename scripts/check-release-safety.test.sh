@@ -9,6 +9,7 @@ trap 'rm -rf "$test_root"' EXIT HUP INT TERM
 test_number=0
 repo_number=0
 current_repo=
+failures=0
 
 ok() {
 	test_number=$((test_number + 1))
@@ -18,7 +19,7 @@ ok() {
 fail() {
 	test_number=$((test_number + 1))
 	printf 'not ok %s - %s\n' "$test_number" "$1" >&2
-	exit 1
+	failures=$((failures + 1))
 }
 
 new_repo() {
@@ -55,6 +56,21 @@ expect_fail() {
 		fail "$label"
 	else
 		ok "$label"
+	fi
+}
+
+expect_reject() {
+	label=$1
+	shift
+	set +e
+	"$@" > "$test_root/output" 2>&1
+	status=$?
+	set -e
+	if [ "$status" -eq 1 ]; then
+		ok "$label"
+	else
+		sed -n '1p' "$test_root/output" >&2
+		fail "$label (scanner exit $status)"
 	fi
 }
 
@@ -126,4 +142,81 @@ expect_fail "tracked image metadata fails" sh -c 'export PATH="$1:$PATH"; cd "$2
 
 expect_pass "built-in scanner self-test passes" "$scanner" --self-test
 
+new_repo
+printf 'next neutral content\n' > "$current_repo/next.txt"
+git -C "$current_repo" add next.txt
+git -C "$current_repo" commit -q -m "$marker_one"
+expect_reject "omitted base still scans commit messages" scan
+expect_reject "unresolved base falls back to all reachable commits" scan refs/heads/missing-fixture
+
+new_repo
+newline_filename="$(printf 'line\n%s.txt' "$marker_one")"
+printf 'neutral filename fixture\n' > "$current_repo/$newline_filename"
+git -C "$current_repo" add -A
+expect_reject "tracked newline filename is scanned without delimiter loss" scan
+rm -f -- "$current_repo/$newline_filename"
+git -C "$current_repo" reset -q --hard HEAD
+
+printf 'neutral\000%s\n' "$marker_one" > "$current_repo/tracked.txt"
+git -C "$current_repo" add tracked.txt
+expect_reject "binary index and worktree bytes after NUL are scanned" scan
+git -C "$current_repo" reset -q --hard HEAD
+
+credential_value="$(printf '%s_%s' runtime fixture_value)"
+printf '{"%s":"%s"}\n' api_key "$credential_value" > "$current_repo/tracked.txt"
+expect_reject "JSON credential assignment fails" scan
+git -C "$current_repo" restore tracked.txt
+
+printf '%s: "%s"\n' access_token "$credential_value" > "$current_repo/tracked.txt"
+expect_reject "YAML credential assignment fails" scan
+git -C "$current_repo" restore tracked.txt
+
+printf '%s = "%s"\n' password "$credential_value" > "$current_repo/tracked.txt"
+expect_reject "TOML spaced credential assignment fails" scan
+git -C "$current_repo" restore tracked.txt
+
+printf '%s := "%s"\n' clientSecret "$credential_value" > "$current_repo/tracked.txt"
+expect_reject "source literal credential assignment fails" scan
+git -C "$current_repo" restore tracked.txt
+
+new_repo
+printf 'identity fixture\n' > "$current_repo/identity.txt"
+git -C "$current_repo" add identity.txt
+git -C "$current_repo" config user.name "$marker_one"
+git -C "$current_repo" commit -q -m "test: add identity fixture"
+expect_reject "commit author and committer names are scanned" scan HEAD~1
+
+new_repo
+ordinary_email="$(printf '%s@%s.%s' author sample invalid)"
+printf 'identity fixture\n' > "$current_repo/identity.txt"
+git -C "$current_repo" add identity.txt
+git -C "$current_repo" config user.email "$ordinary_email"
+git -C "$current_repo" commit -q -m "test: add identity fixture"
+expect_reject "commit author and committer emails are scanned" scan HEAD~1
+
+new_repo
+printf 'staged-metadata-flag\n' > "$current_repo/sample.png"
+git -C "$current_repo" add sample.png
+printf 'clean worktree image\n' > "$current_repo/sample.png"
+staged_fake_bin="$test_root/staged-fake-bin"
+mkdir "$staged_fake_bin"
+cat > "$staged_fake_bin/exiftool" <<'STAGED_EXIFTOOL'
+#!/bin/sh
+value="neutral"
+for candidate do
+	case "$candidate" in
+		-json|--) continue ;;
+	esac
+	if grep -q 'staged-metadata-flag' "$candidate"; then
+		value="$(printf '\143\157\144\145\170')"
+	fi
+done
+printf '[{"Comment":"%s"}]\n' "$value"
+STAGED_EXIFTOOL
+chmod 700 "$staged_fake_bin/exiftool"
+expect_reject "staged image metadata uses index bytes, not worktree replacement" sh -c 'export PATH="$1:$PATH"; cd "$2"; "$3"' sh "$staged_fake_bin" "$current_repo" "$scanner"
+
 printf '1..%s\n' "$test_number"
+if [ "$failures" -ne 0 ]; then
+	exit 1
+fi
