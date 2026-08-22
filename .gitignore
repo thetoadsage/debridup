@@ -6,3 +6,5 @@ bin/
 *.db-wal
 .worktrees/
 .superpowers/
+secrets/*
+!secrets/.gitkeep

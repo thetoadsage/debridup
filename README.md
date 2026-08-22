@@ -10,13 +10,11 @@ All authenticated checks are read-only account or history requests. Most provide
 2. Create a 32-byte encryption key:
 
    ```sh
-   sudo install -d -m 0700 -o root -g root secrets
-   openssl rand -base64 32 | sudo tee secrets/encryption_key > /dev/null
-   sudo chown root:root secrets/encryption_key
-   sudo chmod 0400 secrets/encryption_key
+   install -d -m 0700 secrets
+   openssl rand -base64 32 | sudo install -m 0400 -o root -g root /dev/stdin secrets/encryption_key
    ```
 
-   Compose bind-mounts this file without changing its host ownership or mode. The root-owned directory and key let the capability-restricted startup process open only this secret before it drops to the application user. Do not make the file group- or world-readable. If the key already exists, correct its ownership and mode with the last two commands instead of generating a replacement.
+   The `secrets` directory stays owned by the invoking user so Git and Docker can traverse the tracked placeholder, while only `encryption_key` becomes root-owned and read-only. Compose bind-mounts the key without changing its host ownership or mode, which lets the capability-restricted startup process open it before dropping to the application user. Do not make the key group- or world-readable. If a previous setup made the directory root-owned, restore directory ownership with `sudo chown "$(id -u):$(id -g)" secrets` before running these commands. If the key already exists, use `sudo chown root:root secrets/encryption_key && sudo chmod 0400 secrets/encryption_key` instead of generating a replacement.
 
 3. Start it:
 

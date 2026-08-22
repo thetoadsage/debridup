@@ -304,7 +304,7 @@ func TestEntrypointCheckoutIsLFOnlyAndValidShell(t *testing.T) {
 	}
 }
 
-func TestComposeDocumentationCreatesRootOnlySecret(t *testing.T) {
+func TestComposeDocumentationKeepsDirectoryTraversableAndKeyRootOnly(t *testing.T) {
 	readmePath, err := filepath.Abs(filepath.Join("..", "..", "README.md"))
 	if err != nil {
 		t.Fatal(err)
@@ -315,9 +315,8 @@ func TestComposeDocumentationCreatesRootOnlySecret(t *testing.T) {
 	}
 	readme := string(readmeBytes)
 	for _, required := range []string{
-		"sudo install -d -m 0700 -o root -g root secrets",
-		"chown root:root secrets/encryption_key",
-		"chmod 0400 secrets/encryption_key",
+		"install -d -m 0700 secrets",
+		"sudo install -m 0400 -o root -g root /dev/stdin secrets/encryption_key",
 	} {
 		if !strings.Contains(readme, required) {
 			t.Errorf("Compose secret setup is missing %q", required)
@@ -325,6 +324,51 @@ func TestComposeDocumentationCreatesRootOnlySecret(t *testing.T) {
 	}
 	if strings.Contains(readme, "chmod 600 secrets/encryption_key") {
 		t.Fatal("Compose secret setup leaves the key owned by the invoking user")
+	}
+	if strings.Contains(readme, "install -d -m 0700 -o root -g root secrets") {
+		t.Fatal("Compose secret setup makes the tracked directory inaccessible to the invoking user")
+	}
+}
+
+func TestGitIgnoresGeneratedComposeSecretsButTracksPlaceholder(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitExecutable := "git"
+	gitPrefix := []string{"-c", "safe.directory=" + filepath.ToSlash(repoRoot)}
+	if _, err := exec.LookPath("git.exe"); err == nil {
+		gitExecutable = "git.exe"
+		gitPrefix = nil
+	}
+	gitCommand := func(args ...string) *exec.Cmd {
+		t.Helper()
+		args = append(append([]string{}, gitPrefix...), args...)
+		command := exec.Command(gitExecutable, args...)
+		command.Dir = repoRoot
+		return command
+	}
+	checkIgnored := gitCommand("check-ignore", "--quiet", "--no-index", "secrets/encryption_key")
+	if err := checkIgnored.Run(); err != nil {
+		t.Fatalf("generated Compose secret is not ignored: %v", err)
+	}
+	checkPlaceholder := gitCommand("check-ignore", "--quiet", "--no-index", "secrets/.gitkeep")
+	if err := checkPlaceholder.Run(); err == nil {
+		t.Fatal("tracked secrets placeholder is ignored")
+	}
+	trackedPlaceholder := gitCommand("ls-files", "--error-unmatch", "secrets/.gitkeep")
+	if output, err := trackedPlaceholder.CombinedOutput(); err != nil {
+		t.Fatalf("secrets placeholder is not tracked: %v: %s", err, output)
+	}
+	if _, err := os.ReadFile(filepath.Join(repoRoot, "secrets", ".gitkeep")); err != nil {
+		t.Fatalf("tracked secrets placeholder is not readable: %v", err)
+	}
+	dockerIgnore, err := os.ReadFile(filepath.Join(repoRoot, ".dockerignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(dockerIgnore), "secrets/*") || !strings.Contains(string(dockerIgnore), "!secrets/.gitkeep") {
+		t.Fatal("Docker context does not exclude generated secrets while retaining the placeholder")
 	}
 }
 
