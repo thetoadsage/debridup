@@ -1,7 +1,281 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DebridUp</title><link rel="stylesheet" href="/app.css"><link rel="stylesheet" href="/chart.css"><link rel="stylesheet" href="/notifications.css"><link rel="stylesheet" href="/provider-management.css"><link rel="stylesheet" href="/incidents.css"></head>
-<body><header><a class="brand" href="/"><span class="mark">D</span>DebridUp</a><nav><button id="refresh" class="quiet">Refresh</button><button id="logout" class="quiet">Sign out</button></nav></header>
-<main><section class="hero"><div><p class="eyebrow">PRIVATE MONITORING</p><h1>Provider status</h1><p id="updated" class="muted">Loading…</p></div><button id="add-monitor">Add provider</button></section><section id="cards" class="cards"></section>
-<section class="panel"><div class="section-title"><div><p class="eyebrow">30 DAYS</p><h2>Availability comparison</h2><p class="muted">Based on confirmed incidents. Isolated failed checks do not reduce availability.</p></div><button type="button" id="reset-all-stats" class="quiet danger-quiet">Reset all stats</button></div><div id="comparison" class="comparison"></div></section>
-<section class="split"><section class="panel"><div class="section-title"><h2>Recent incidents</h2></div><div id="incidents" class="list"></div></section><section class="panel notification-panel"><div class="section-title"><div><p class="eyebrow">DELIVERY CHANNEL</p><h2>Notifications</h2></div><span id="ntfy-badge" class="channel-badge unconfigured">Not configured</span></div><div class="channel-summary"><div class="channel-icon">N</div><div><strong>ntfy</strong><p id="ntfy-detail" class="muted">Add a topic URL to configure this channel.</p></div></div><form id="ntfy-form" class="form compact"><label><span id="ntfy-url-label">Topic URL</span><input id="ntfy-url" type="url" autocomplete="off" placeholder="https://ntfy.sh/your-private-topic"><small id="ntfy-url-help">The URL is encrypted and will not be shown again.</small></label><label class="toggle-row"><span><strong>Incident notifications</strong><small>Send confirmed failures, state changes, and recoveries.</small></span><input id="ntfy-enabled" type="checkbox"></label><div class="notification-actions"><button type="submit">Save settings</button><button type="button" id="ntfy-test" class="secondary" disabled>Send test notification</button></div><p id="ntfy-message" class="channel-message" role="status" aria-live="polite"></p></form></section></section></main>
-<dialog id="monitor-dialog"><form id="monitor-form" class="form"><div class="dialog-head"><div><p id="monitor-dialog-eyebrow" class="eyebrow">NEW MONITOR</p><h2 id="monitor-dialog-title">Add provider</h2></div><button type="button" class="quiet close-button" id="close-dialog" aria-label="Close">×</button></div><label>Provider<select id="provider"><option value="torbox">TorBox</option><option value="premiumize">Premiumize</option><option value="alldebrid">AllDebrid</option><option value="realdebrid">Real-Debrid</option><option value="torrin">Torrin</option><option value="pikpak">PikPak</option><option value="offcloud">Offcloud</option><option value="debridlink">Debrid-Link</option><option value="easydebrid">EasyDebrid</option><option value="debrider">Debrider</option><option value="deepbrid">Deepbrid</option></select></label><label>Display name<input id="name" required maxlength="80" placeholder="TorBox"></label><label><span id="api-key-label">API key</span><input id="api-key" type="password" autocomplete="off"><small id="api-key-help">Required when adding a provider.</small></label><div class="two"><label>Interval (seconds)<input id="interval" type="number" min="15" max="3600" value="60" required></label><label>Timeout (seconds)<input id="timeout" type="number" min="3" max="60" value="15" required></label><label>Failure confirmations<input id="failure" type="number" min="1" max="20" value="3" required></label><label>Recovery confirmations<input id="recovery" type="number" min="1" max="20" value="2" required></label></div><label class="toggle-row"><span><strong>Monitor enabled</strong><small>Run scheduled checks and update provider status.</small></span><input id="monitor-enabled" type="checkbox" checked></label><label class="toggle-row"><span><strong>Public status check</strong><small>Also poll the provider’s official status or public service endpoint.</small></span><input id="public-check" type="checkbox"></label><p id="monitor-error" class="error"></p><div class="dialog-actions"><button type="button" id="delete-monitor" class="danger" hidden>Delete provider</button><button type="button" id="reset-monitor-stats" class="danger-quiet" hidden>Reset stats</button><button id="monitor-submit">Add provider</button></div></form></dialog><script src="/app.js"></script></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DebridUp</title>
+  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/chart.css">
+  <link rel="stylesheet" href="/notifications.css">
+  <link rel="stylesheet" href="/provider-management.css">
+  <link rel="stylesheet" href="/incidents.css">
+</head>
+<body>
+  <a class="skip-link" href="#dashboard-main">Skip to dashboard</a>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="DebridUp dashboard">
+        <span class="mark" aria-hidden="true">D</span>
+        <span>DebridUp</span>
+      </a>
+
+      <nav aria-label="Primary">
+        <a class="nav-link active" href="#dashboard-main" aria-current="page">Dashboard</a>
+        <a class="nav-link" href="#provider-management">Providers</a>
+        <a class="nav-link" href="#incidents-panel">Incidents</a>
+        <a class="nav-link" href="#notification-settings">Settings</a>
+      </nav>
+
+      <button id="logout" class="quiet sidebar-signout" type="button">Sign out</button>
+    </aside>
+
+    <main id="dashboard-main" class="dashboard-main">
+      <header class="dashboard-header">
+        <div>
+          <h1>Operations overview</h1>
+          <p id="dashboard-status" class="dashboard-status" role="status" aria-live="polite">
+            <span id="updated">Loading dashboard data…</span>
+          </p>
+        </div>
+        <div class="dashboard-actions">
+          <div id="range-controls" class="range-controls" role="group" aria-label="Dashboard time range">
+            <button class="range-button active" type="button" data-range="24h" aria-pressed="true">24 hours</button>
+            <button class="range-button" type="button" data-range="7d" aria-pressed="false">7 days</button>
+            <button class="range-button" type="button" data-range="30d" aria-pressed="false">30 days</button>
+          </div>
+          <button id="refresh" type="button">Refresh</button>
+        </div>
+      </header>
+
+      <section id="summary" class="summary-grid" aria-labelledby="summary-heading" aria-busy="true">
+        <h2 id="summary-heading" class="sr-only">Current status summary</h2>
+        <article class="summary-card">
+          <span class="summary-label">Overall status</span>
+          <span class="skeleton skeleton-value" aria-hidden="true"></span>
+          <span class="sr-only">Loading overall status</span>
+        </article>
+        <article class="summary-card">
+          <span class="summary-label">Providers online</span>
+          <span class="skeleton skeleton-value" aria-hidden="true"></span>
+          <span class="sr-only">Loading providers online</span>
+        </article>
+        <article class="summary-card">
+          <span class="summary-label">Active incidents</span>
+          <span class="skeleton skeleton-value" aria-hidden="true"></span>
+          <span class="sr-only">Loading active incidents</span>
+        </article>
+        <article class="summary-card">
+          <span class="summary-label">Checks completed today</span>
+          <span class="skeleton skeleton-value" aria-hidden="true"></span>
+          <span class="sr-only">Loading checks completed today</span>
+        </article>
+      </section>
+
+      <section id="provider-pulse" class="panel dashboard-panel pulse-panel" aria-labelledby="pulse-heading" aria-busy="true">
+        <div class="section-title">
+          <div>
+            <h2 id="pulse-heading">Provider pulse</h2>
+            <p class="muted">Health changes across the selected range.</p>
+          </div>
+          <span class="status-key"><span class="status-dot unknown" aria-hidden="true"></span>Loading status</span>
+        </div>
+        <div class="pulse-skeleton" aria-hidden="true">
+          <span class="skeleton skeleton-label"></span><span class="skeleton skeleton-track"></span>
+          <span class="skeleton skeleton-label"></span><span class="skeleton skeleton-track"></span>
+          <span class="skeleton skeleton-label"></span><span class="skeleton skeleton-track"></span>
+        </div>
+      </section>
+
+      <section class="panel dashboard-panel provider-table-panel" aria-labelledby="providers-heading">
+        <div class="section-title">
+          <div>
+            <h2 id="providers-heading">Providers</h2>
+            <p class="muted">Current state and service-level performance.</p>
+          </div>
+          <span class="table-hint">Select a provider for details</span>
+        </div>
+        <div class="table-scroll" tabindex="0" aria-label="Scrollable provider status table">
+          <table class="provider-table">
+            <caption class="sr-only">Provider health and latency metrics</caption>
+            <thead>
+              <tr>
+                <th scope="col">Provider</th>
+                <th scope="col">Status</th>
+                <th scope="col">Uptime</th>
+                <th scope="col">p50 latency</th>
+                <th scope="col">p95 latency</th>
+                <th scope="col">Last check</th>
+                <th scope="col">Recent status</th>
+              </tr>
+            </thead>
+            <tbody id="provider-table-body" aria-busy="true">
+              <tr class="skeleton-row" aria-label="Loading provider status">
+                <td><span class="skeleton skeleton-cell wide"></span></td>
+                <td><span class="skeleton skeleton-cell"></span></td>
+                <td><span class="skeleton skeleton-cell"></span></td>
+                <td><span class="skeleton skeleton-cell"></span></td>
+                <td><span class="skeleton skeleton-cell"></span></td>
+                <td><span class="skeleton skeleton-cell wide"></span></td>
+                <td><span class="skeleton skeleton-strip"></span></td>
+              </tr>
+              <tr class="skeleton-row" aria-hidden="true">
+                <td><span class="skeleton skeleton-cell wide"></span></td>
+                <td><span class="skeleton skeleton-cell"></span></td>
+                <td><span class="skeleton skeleton-cell"></span></td>
+                <td><span class="skeleton skeleton-cell"></span></td>
+                <td><span class="skeleton skeleton-cell"></span></td>
+                <td><span class="skeleton skeleton-cell wide"></span></td>
+                <td><span class="skeleton skeleton-strip"></span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <div class="analytics-grid">
+        <section class="panel dashboard-panel latency-comparison" aria-labelledby="latency-heading">
+          <div class="section-title">
+            <div>
+              <h2 id="latency-heading">Latency comparison</h2>
+              <p class="muted">Response time in milliseconds.</p>
+            </div>
+          </div>
+          <div id="latency-chart" class="chart-stage" role="img" aria-label="Latency comparison chart loading" aria-busy="true">
+            <div class="chart-skeleton" aria-hidden="true">
+              <span class="skeleton chart-line-placeholder line-one"></span>
+              <span class="skeleton chart-line-placeholder line-two"></span>
+              <span class="skeleton chart-line-placeholder line-three"></span>
+            </div>
+          </div>
+          <p class="sr-only">Latency comparison data is loading.</p>
+        </section>
+
+        <section id="incidents-panel" class="panel dashboard-panel incidents-panel" aria-labelledby="incidents-heading">
+          <div class="section-title">
+            <div>
+              <h2 id="incidents-heading">Recent incidents</h2>
+              <p class="muted">Latest confirmed provider events.</p>
+            </div>
+          </div>
+          <div id="incidents" class="list" aria-live="polite">
+            <div class="incident-skeleton" aria-hidden="true">
+              <span class="skeleton skeleton-label"></span>
+              <span class="skeleton skeleton-copy"></span>
+              <span class="skeleton skeleton-copy short"></span>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <section id="provider-management" class="panel dashboard-panel management-panel" aria-labelledby="management-heading">
+        <div class="section-title">
+          <div>
+            <h2 id="management-heading">Provider settings</h2>
+            <p class="muted">Add providers or update monitoring configuration.</p>
+          </div>
+          <div class="management-actions">
+            <button type="button" id="reset-all-stats" class="quiet danger-quiet">Reset all stats</button>
+            <button type="button" id="add-monitor">Add provider</button>
+          </div>
+        </div>
+        <div id="cards" class="cards management-grid"></div>
+        <div class="legacy-comparison">
+          <h3>Confirmed availability</h3>
+          <div id="comparison" class="comparison"></div>
+        </div>
+      </section>
+
+      <section id="notification-settings" class="panel dashboard-panel notification-panel" aria-labelledby="notifications-heading">
+        <div class="section-title">
+          <div>
+            <h2 id="notifications-heading">Notifications</h2>
+          </div>
+          <span id="ntfy-badge" class="channel-badge unconfigured">Not configured</span>
+        </div>
+        <div class="channel-summary">
+          <div class="channel-icon" aria-hidden="true">N</div>
+          <div>
+            <strong>ntfy</strong>
+            <p id="ntfy-detail" class="muted">Add a topic URL to configure this channel.</p>
+          </div>
+        </div>
+        <form id="ntfy-form" class="form compact">
+          <label>
+            <span id="ntfy-url-label">Topic URL</span>
+            <input id="ntfy-url" type="url" autocomplete="off" placeholder="https://ntfy.sh/your-private-topic">
+            <small id="ntfy-url-help">The URL is encrypted and will not be shown again.</small>
+          </label>
+          <label class="toggle-row">
+            <span><strong>Incident notifications</strong><small>Send confirmed failures, state changes, and recoveries.</small></span>
+            <input id="ntfy-enabled" type="checkbox">
+          </label>
+          <div class="notification-actions">
+            <button type="submit">Save settings</button>
+            <button type="button" id="ntfy-test" class="secondary" disabled>Send test notification</button>
+          </div>
+          <p id="ntfy-message" class="channel-message" role="status" aria-live="polite"></p>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <div id="provider-drawer-overlay" class="drawer-overlay" hidden></div>
+  <aside id="provider-drawer" class="provider-drawer" role="dialog" aria-modal="true" aria-labelledby="provider-drawer-title" aria-hidden="true" tabindex="-1" hidden>
+    <div class="drawer-header">
+      <div>
+        <h2 id="provider-drawer-title">Provider</h2>
+      </div>
+      <button id="provider-drawer-close" class="quiet close-button" type="button" aria-label="Close provider details">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <p class="state checking">Checking</p>
+    <dl class="drawer-metrics">
+      <div><dt>State duration</dt><dd>Loading…</dd></div>
+      <div><dt>Availability</dt><dd>Loading…</dd></div>
+      <div><dt>p50 latency</dt><dd>Loading…</dd></div>
+      <div><dt>p95 latency</dt><dd>Loading…</dd></div>
+      <div><dt>Last successful check</dt><dd>Loading…</dd></div>
+      <div><dt>Slowest check</dt><dd>Loading…</dd></div>
+    </dl>
+    <section class="drawer-events" aria-labelledby="drawer-events-heading">
+      <h3 id="drawer-events-heading">Recent incidents</h3>
+      <ul class="drawer-incident-list">
+        <li class="muted">Incident history is loading.</li>
+      </ul>
+    </section>
+  </aside>
+
+  <dialog id="monitor-dialog">
+    <form id="monitor-form" class="form">
+      <div class="dialog-head">
+        <div>
+          <p id="monitor-dialog-eyebrow" class="eyebrow">NEW MONITOR</p>
+          <h2 id="monitor-dialog-title">Add provider</h2>
+        </div>
+        <button type="button" class="quiet close-button" id="close-dialog" aria-label="Close">×</button>
+      </div>
+      <label>Provider<select id="provider"><option value="torbox">TorBox</option><option value="premiumize">Premiumize</option><option value="alldebrid">AllDebrid</option><option value="realdebrid">Real-Debrid</option><option value="torrin">Torrin</option><option value="pikpak">PikPak</option><option value="offcloud">Offcloud</option><option value="debridlink">Debrid-Link</option><option value="easydebrid">EasyDebrid</option><option value="debrider">Debrider</option><option value="deepbrid">Deepbrid</option></select></label>
+      <label>Display name<input id="name" required maxlength="80" placeholder="TorBox"></label>
+      <label><span id="api-key-label">API key</span><input id="api-key" type="password" autocomplete="off"><small id="api-key-help">Required when adding a provider.</small></label>
+      <div class="two">
+        <label>Interval (seconds)<input id="interval" type="number" min="15" max="3600" value="60" required></label>
+        <label>Timeout (seconds)<input id="timeout" type="number" min="3" max="60" value="15" required></label>
+        <label>Failure confirmations<input id="failure" type="number" min="1" max="20" value="3" required></label>
+        <label>Recovery confirmations<input id="recovery" type="number" min="1" max="20" value="2" required></label>
+      </div>
+      <label class="toggle-row"><span><strong>Monitor enabled</strong><small>Run scheduled checks and update provider status.</small></span><input id="monitor-enabled" type="checkbox" checked></label>
+      <label class="toggle-row"><span><strong>Public status check</strong><small>Also poll the provider’s official status or public service endpoint.</small></span><input id="public-check" type="checkbox"></label>
+      <p id="monitor-error" class="error"></p>
+      <div class="dialog-actions">
+        <button type="button" id="delete-monitor" class="danger" hidden>Delete provider</button>
+        <button type="button" id="reset-monitor-stats" class="danger-quiet" hidden>Reset stats</button>
+        <button id="monitor-submit">Add provider</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/app.js"></script>
+</body>
+</html>

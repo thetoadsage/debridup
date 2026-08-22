@@ -43,6 +43,23 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+func TestDashboardHTMLContainsAccessibleLandmarks(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(b)
+	for _, required := range []string{
+		`<nav aria-label="Primary">`, `id="range-controls"`, `id="summary"`,
+		`id="provider-pulse"`, `id="provider-table-body"`, `id="latency-chart"`,
+		`id="provider-drawer"`, `aria-live="polite"`,
+	} {
+		if !strings.Contains(html, required) {
+			t.Errorf("missing %s", required)
+		}
+	}
+}
+
 func TestSendNtfyReportsHTTPFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
