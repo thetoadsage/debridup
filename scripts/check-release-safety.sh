@@ -209,6 +209,7 @@ fi
 scan_source "$index_content" 'staged index blob content'
 
 commit_content="$scan_root/commit-content"
+commit_revisions="$scan_root/commit-revisions"
 commit_range=HEAD
 case "$base_ref" in
 	'') ;;
@@ -219,10 +220,34 @@ case "$base_ref" in
 		;;
 	*) ;;
 esac
-if ! git log --format='%an%n%ae%n%cn%n%ce%n%s%n%b' "$commit_range" -- > "$commit_content"; then
+if ! git rev-list "$commit_range" -- > "$commit_revisions"; then
 	printf '%s\n' 'release-safety scan could not inspect commit metadata' >&2
 	exit 2
 fi
+: > "$commit_content"
+while IFS= read -r commit; do
+	if ! git show -s --format='%an%n%ae%n%cn%n%ce' "$commit" >> "$commit_content"; then
+		printf '%s\n' 'release-safety scan could not inspect commit metadata' >&2
+		exit 2
+	fi
+	parents="$(git show -s --format='%P' "$commit")"
+	committer_email="$(git show -s --format='%ce' "$commit")"
+	subject="$(git show -s --format='%s' "$commit")"
+	generated_merge=0
+	case "$parents" in
+		*' '*)
+			case "$committer_email:$subject" in
+				noreply@github.com:'Merge pull request #'*' from '*) generated_merge=1 ;;
+			esac
+			;;
+	esac
+	if [ "$generated_merge" -eq 0 ]; then
+		if ! git show -s --format='%s%n%b' "$commit" >> "$commit_content"; then
+			printf '%s\n' 'release-safety scan could not inspect commit metadata' >&2
+			exit 2
+		fi
+	fi
+done < "$commit_revisions"
 scan_source "$commit_content" 'commit metadata'
 
 change_content="$scan_root/change-content"
