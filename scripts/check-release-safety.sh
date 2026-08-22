@@ -98,6 +98,7 @@ single_quote="$(printf '\047')"
 	printf '^[[:space:]]*(export[[:space:]]+)?[[:alnum:]_.-]*%s[[:alnum:]_.-]*=[[:space:]]*[^$<{[:space:]][^[:space:]]*[[:space:]]*$\n' "$credential_name"
 	printf '(^|[,{[:space:]])("|%s)?[[:alnum:]_.-]*%s[[:alnum:]_.-]*("|%s)?[[:space:]]*(:=|=|:)[[:space:]]*("|%s)[^"%s]+("|%s)' "$single_quote" "$credential_name" "$single_quote" "$single_quote" "$single_quote" "$single_quote"
 	printf '\n'
+	printf '^[[:space:]]*("|%s)?[[:alnum:]_.-]*%s[[:alnum:]_.-]*("|%s)?[[:space:]]*:[[:space:]]*[^$<{!&*[:space:]][^[:space:]#]*([[:space:]]+#.*)?[[:space:]]*$\n' "$single_quote" "$credential_name" "$single_quote"
 } > "$credential_patterns"
 
 marker_one="$(printf '\143\157\144\145\170')"
@@ -134,7 +135,8 @@ scan_source() {
 
 	: > "$credential_matches"
 	grep -aEi -f "$credential_patterns" "$source_file" > "$credential_matches" || true
-	if [ -s "$credential_matches" ] && grep -Eiv '=[[:space:]]*"?(replace([-_]with)?|change([-_]?me)?|example|placeholder|dummy)([-_.[:alnum:]]*)"?[[:space:]]*$' "$credential_matches" >/dev/null; then
+	safe_credential_pattern="(:=|=|:)[[:space:]]*(\"|$single_quote)?(replace([-_]with)?|change([-_]?me)?|example|placeholder|dummy)([-_.[:alnum:]])*(\"|$single_quote)?([[:space:]]+#.*)?[[:space:]]*$"
+	if [ -s "$credential_matches" ] && grep -Eiv "$safe_credential_pattern" "$credential_matches" >/dev/null; then
 		reject_source "$source_name" 'a credential assignment'
 	fi
 
