@@ -495,6 +495,10 @@ func TestPulseStylesBoundMaximumHistoryWithoutColorOnlyMeaning(t *testing.T) {
 	if !strings.Contains(css, `.pulse-track { display: grid; min-width: 0; max-width: 100%; overflow: hidden; grid-template-columns: repeat(var(--pulse-bucket-count, 1), minmax(0, 1fr));`) {
 		t.Fatal("pulse track must scale every server bucket inside its available width")
 	}
+	if !strings.Contains(css, `.pulse-rows { display: grid; gap: 5px; margin-top: 16px; }`) ||
+		!strings.Contains(css, `.pulse-bucket { display: grid; width: 100%; min-width: 0; height: 14px;`) {
+		t.Fatal("pulse rows must remain compact as the provider count grows")
+	}
 	if strings.Count(css, "repeating-linear-gradient") < 4 {
 		t.Fatal("pulse states must use distinct visible patterns in addition to color")
 	}
