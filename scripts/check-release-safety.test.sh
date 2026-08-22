@@ -127,6 +127,30 @@ git -C "$current_repo" commit -q -m "$marker_one"
 expect_fail "commit message range fails" scan HEAD~1
 
 new_repo
+base_branch="$(git -C "$current_repo" branch --show-current)"
+generated_branch="generated-$marker_one-branch"
+git -C "$current_repo" switch -q -c "$generated_branch"
+printf 'neutral merged content\n' > "$current_repo/merged.txt"
+git -C "$current_repo" add merged.txt
+git -C "$current_repo" commit -q -m "test: add neutral merged fixture"
+git -C "$current_repo" switch -q "$base_branch"
+git -C "$current_repo" config user.name "GitHub"
+git -C "$current_repo" config user.email "noreply@github.com"
+git -C "$current_repo" merge -q --no-ff -m "Merge pull request #1 from sample/$generated_branch" "$generated_branch"
+expect_pass "GitHub-generated merge subjects are excluded from attribution scanning" scan HEAD^1
+
+new_repo
+base_branch="$(git -C "$current_repo" branch --show-current)"
+untrusted_branch="untrusted-$marker_one-branch"
+git -C "$current_repo" switch -q -c "$untrusted_branch"
+printf 'neutral merged content\n' > "$current_repo/merged.txt"
+git -C "$current_repo" add merged.txt
+git -C "$current_repo" commit -q -m "test: add neutral merged fixture"
+git -C "$current_repo" switch -q "$base_branch"
+git -C "$current_repo" merge -q --no-ff -m "Merge pull request #1 from sample/$untrusted_branch" "$untrusted_branch"
+expect_fail "non-GitHub merge subjects remain scanned" scan HEAD^1
+
+new_repo
 printf 'synthetic image bytes\n' > "$current_repo/sample.png"
 git -C "$current_repo" add sample.png
 git -C "$current_repo" commit -q -m "test: add image fixture"
