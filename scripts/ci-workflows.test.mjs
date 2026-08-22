@@ -58,6 +58,7 @@ test('verification job runs every required gate with fixed toolchains', () => {
   for (const expected of [
     'go-version: "1.25.14"',
     'node-version: "22"',
+    'ref: ${{ github.event.pull_request.head.sha || github.sha }}',
     'gofmt -l',
     'go test ./...',
     'go test -race ./...',
