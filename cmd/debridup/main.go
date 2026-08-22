@@ -37,7 +37,10 @@ const (
 	stateAuthFailed = "auth_failed"
 	stateAPI        = "api_issue"
 	stateConnection = "connection_issue"
+	maxKeyInputSize = 4 << 10
 )
+
+var errInvalidEncryptionKey = errors.New("invalid encryption key")
 
 type app struct {
 	db        *sql.DB
@@ -152,17 +155,34 @@ func env(k, fallback string) string {
 }
 
 func loadKey() ([]byte, error) {
-	v := os.Getenv("DEBRIDUP_ENCRYPTION_KEY")
-	if p := os.Getenv("DEBRIDUP_ENCRYPTION_KEY_FILE"); p != "" {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			return nil, err
+	var v string
+	if rawFD := os.Getenv("DEBRIDUP_ENCRYPTION_KEY_FD"); rawFD != "" {
+		fd, err := strconv.Atoi(rawFD)
+		if err != nil || fd < 0 {
+			return nil, errInvalidEncryptionKey
+		}
+		file := os.NewFile(uintptr(fd), "encryption-key")
+		if file == nil {
+			return nil, errInvalidEncryptionKey
+		}
+		b, readErr := io.ReadAll(io.LimitReader(file, maxKeyInputSize+1))
+		closeErr := file.Close()
+		if readErr != nil || closeErr != nil || len(b) > maxKeyInputSize {
+			return nil, errInvalidEncryptionKey
 		}
 		v = string(b)
+	} else if p := os.Getenv("DEBRIDUP_ENCRYPTION_KEY_FILE"); p != "" {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return nil, errInvalidEncryptionKey
+		}
+		v = string(b)
+	} else {
+		v = os.Getenv("DEBRIDUP_ENCRYPTION_KEY")
 	}
 	b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(v))
 	if err != nil || len(b) != chacha20poly1305.KeySize {
-		return nil, errors.New("DEBRIDUP_ENCRYPTION_KEY(_FILE) must be base64 for exactly 32 bytes")
+		return nil, errInvalidEncryptionKey
 	}
 	return b, nil
 }

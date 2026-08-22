@@ -4,13 +4,304 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/chacha20poly1305"
 )
+
+func TestLoadKeyReadsInheritedDescriptor(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	encoded := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, chacha20poly1305.KeySize))
+	if _, err := io.WriteString(w, encoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY", "")
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FILE", "")
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FD", strconv.FormatUint(uint64(r.Fd()), 10))
+
+	got, err := loadKey()
+	_ = r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, bytes.Repeat([]byte{7}, chacha20poly1305.KeySize)) {
+		t.Fatal("wrong key")
+	}
+}
+
+func TestLoadKeyClosesInheritedDescriptor(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	encoded := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{8}, chacha20poly1305.KeySize))
+	if _, err := io.WriteString(w, encoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY", "")
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FILE", "")
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FD", strconv.FormatUint(uint64(r.Fd()), 10))
+
+	if _, err := loadKey(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Read(make([]byte, 1)); err == nil {
+		t.Fatal("descriptor remained open after key load")
+	}
+	_ = r.Close()
+}
+
+func TestLoadKeyUsesDescriptorBeforeFileAndDirectValue(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	descriptorKey := bytes.Repeat([]byte{9}, chacha20poly1305.KeySize)
+	if _, err := io.WriteString(w, base64.StdEncoding.EncodeToString(descriptorKey)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fileKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{10}, chacha20poly1305.KeySize))
+	keyFile := filepath.Join(t.TempDir(), "encryption-key")
+	if err := os.WriteFile(keyFile, []byte(fileKey), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{11}, chacha20poly1305.KeySize)))
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FILE", keyFile)
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FD", strconv.FormatUint(uint64(r.Fd()), 10))
+
+	got, err := loadKey()
+	_ = r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, descriptorKey) {
+		t.Fatal("descriptor did not take precedence")
+	}
+}
+
+func TestLoadKeyDoesNotFallBackFromInvalidDescriptor(t *testing.T) {
+	validFallback := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{13}, chacha20poly1305.KeySize))
+	keyFile := filepath.Join(t.TempDir(), "encryption-key")
+	if err := os.WriteFile(keyFile, []byte(validFallback), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY", validFallback)
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FILE", keyFile)
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FD", "invalid-descriptor")
+
+	if _, err := loadKey(); err != errInvalidEncryptionKey {
+		t.Fatalf("invalid descriptor error = %v", err)
+	}
+}
+
+func TestLoadKeyPreservesFileAndDevelopmentFallbacks(t *testing.T) {
+	fileKey := bytes.Repeat([]byte{14}, chacha20poly1305.KeySize)
+	directKey := bytes.Repeat([]byte{15}, chacha20poly1305.KeySize)
+	keyFile := filepath.Join(t.TempDir(), "encryption-key")
+	if err := os.WriteFile(keyFile, []byte(base64.StdEncoding.EncodeToString(fileKey)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FD", "")
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FILE", keyFile)
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(directKey))
+
+	got, err := loadKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, fileKey) {
+		t.Fatal("file input did not take precedence over the development fallback")
+	}
+
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FILE", "")
+	got, err = loadKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, directKey) {
+		t.Fatal("development fallback stopped working")
+	}
+}
+
+func TestLoadKeyRejectsUnsafeSourcesWithGenericErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		direct string
+		file   string
+		fd     string
+	}{
+		{name: "missing"},
+		{name: "negative descriptor", fd: "-1"},
+		{name: "malformed descriptor", fd: "not-a-descriptor"},
+		{name: "missing file", file: filepath.Join(t.TempDir(), "absent-key")},
+		{name: "invalid direct value", direct: "invalid-key-input"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DEBRIDUP_ENCRYPTION_KEY", tc.direct)
+			t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FILE", tc.file)
+			t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FD", tc.fd)
+			_, err := loadKey()
+			if err == nil {
+				t.Fatal("unsafe key source was accepted")
+			}
+			if err.Error() != "invalid encryption key" {
+				t.Fatalf("unsafe error detail: %q", err)
+			}
+		})
+	}
+}
+
+func TestLoadKeyRejectsOversizedDescriptorAndClosesIt(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	writeDone := make(chan error, 1)
+	go func() {
+		_, writeErr := w.Write(bytes.Repeat([]byte{'x'}, 4097))
+		if closeErr := w.Close(); writeErr == nil {
+			writeErr = closeErr
+		}
+		writeDone <- writeErr
+	}()
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY", "")
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FILE", "")
+	t.Setenv("DEBRIDUP_ENCRYPTION_KEY_FD", strconv.FormatUint(uint64(r.Fd()), 10))
+
+	_, err = loadKey()
+	if err == nil || err.Error() != "invalid encryption key" {
+		t.Fatalf("oversized descriptor error = %v", err)
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Read(make([]byte, 1)); err == nil {
+		t.Fatal("oversized descriptor remained open")
+	}
+	_ = r.Close()
+}
+
+func TestEntrypointHandsOffSecretByDescriptorOnly(t *testing.T) {
+	tempDir := t.TempDir()
+	secretPath := filepath.Join(tempDir, "encryption-key")
+	secret := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{12}, chacha20poly1305.KeySize))
+	if err := os.WriteFile(secretPath, []byte(secret), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	probePath := filepath.Join(tempDir, "entrypoint-probe")
+	fakeSuExec := filepath.Join(tempDir, "su-exec")
+	probeScript := `#!/bin/sh
+set -eu
+[ "${DEBRIDUP_ENCRYPTION_KEY+x}" != x ] || exit 70
+[ "${DEBRIDUP_ENCRYPTION_KEY_FILE+x}" != x ] || exit 71
+[ "${DEBRIDUP_ENCRYPTION_KEY_FD:-}" = 3 ] || exit 72
+{
+  printf '%s\n' "$DEBRIDUP_ENCRYPTION_KEY_FD" "$#"
+  printf '%s\n' "$@"
+  cat <&3
+} > "$ENTRYPOINT_PROBE_OUTPUT"
+`
+	if err := os.WriteFile(fakeSuExec, []byte(probeScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entrypoint := executableEntrypointForTest(t, tempDir)
+	command := exec.Command("sh", entrypoint)
+	command.Env = []string{
+		"PATH=" + tempDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"PUID=99",
+		"PGID=100",
+		"DEBRIDUP_ENCRYPTION_KEY=" + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{16}, chacha20poly1305.KeySize)),
+		"DEBRIDUP_ENCRYPTION_KEY_FILE=" + secretPath,
+		"ENTRYPOINT_PROBE_OUTPUT=" + probePath,
+	}
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("entrypoint failed: %v: %s", err, output)
+	}
+
+	probe, err := os.ReadFile(probePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPrefix := "3\n2\n99:100\n/usr/local/bin/debridup\n"
+	if !bytes.Equal(probe, append([]byte(wantPrefix), []byte(secret)...)) {
+		t.Fatal("entrypoint did not preserve the descriptor-only handoff and safe process arguments")
+	}
+}
+
+func TestEntrypointFailsBeforePrivilegeDropWhenSecretFileIsMissing(t *testing.T) {
+	tempDir := t.TempDir()
+	probePath := filepath.Join(tempDir, "privilege-drop-probe")
+	fakeSuExec := filepath.Join(tempDir, "su-exec")
+	if err := os.WriteFile(fakeSuExec, []byte("#!/bin/sh\n: > \"$ENTRYPOINT_PROBE_OUTPUT\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entrypoint := executableEntrypointForTest(t, tempDir)
+	command := exec.Command("sh", entrypoint)
+	command.Env = []string{
+		"PATH=" + tempDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"PUID=99",
+		"PGID=100",
+		"DEBRIDUP_ENCRYPTION_KEY_FILE=" + filepath.Join(tempDir, "absent-key"),
+		"ENTRYPOINT_PROBE_OUTPUT=" + probePath,
+	}
+	if err := command.Run(); err == nil {
+		t.Fatal("entrypoint accepted a missing secret file")
+	}
+	if _, err := os.Stat(probePath); !os.IsNotExist(err) {
+		t.Fatal("entrypoint dropped privileges before rejecting the missing secret")
+	}
+}
+
+func executableEntrypointForTest(t *testing.T, tempDir string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("entrypoint requires a POSIX shell")
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("entrypoint requires a POSIX shell")
+	}
+	entrypointSource, err := filepath.Abs(filepath.Join("..", "..", "docker-entrypoint.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entrypointBytes, err := os.ReadFile(entrypointSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entrypoint := filepath.Join(tempDir, "docker-entrypoint")
+	if err := os.WriteFile(entrypoint, bytes.ReplaceAll(entrypointBytes, []byte("\r\n"), []byte("\n")), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return entrypoint
+}
 
 func TestSendNtfy(t *testing.T) {
 	var gotTitle, gotTags, gotEventID, gotBody string
