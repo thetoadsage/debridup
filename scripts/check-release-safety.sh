@@ -98,7 +98,7 @@ single_quote="$(printf '\047')"
 	printf '^[[:space:]]*(export[[:space:]]+)?[[:alnum:]_.-]*%s[[:alnum:]_.-]*=[[:space:]]*[^$<{[:space:]][^[:space:]]*[[:space:]]*$\n' "$credential_name"
 	printf '(^|[,{[:space:]])("|%s)?[[:alnum:]_.-]*%s[[:alnum:]_.-]*("|%s)?[[:space:]]*(:=|=|:)[[:space:]]*("|%s)[^"%s]+("|%s)' "$single_quote" "$credential_name" "$single_quote" "$single_quote" "$single_quote" "$single_quote"
 	printf '\n'
-	printf '^[[:space:]]*("|%s)?[[:alnum:]_.-]*%s[[:alnum:]_.-]*("|%s)?[[:space:]]*:[[:space:]]*[^$<{!&*[:space:]][^[:space:]#]*([[:space:]]+#.*)?[[:space:]]*$\n' "$single_quote" "$credential_name" "$single_quote"
+	printf '^[[:space:]]*("|%s)?[[:alnum:]_.-]*%s[[:alnum:]_.-]*("|%s)?[[:space:]]*:[[:space:]]*[^=$<{!&*[:space:]#][^#]*([[:space:]]+#.*)?[[:space:]]*$\n' "$single_quote" "$credential_name" "$single_quote"
 } > "$credential_patterns"
 
 marker_one="$(printf '\143\157\144\145\170')"

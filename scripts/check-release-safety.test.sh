@@ -175,6 +175,11 @@ printf '%s: %s\n' access_token "$credential_value" > "$current_repo/tracked.txt"
 expect_reject "unquoted YAML credential assignment fails" scan
 git -C "$current_repo" restore tracked.txt
 
+multiword_credential_value="$(printf '%s %s %s' runtime fixture value)"
+printf '%s: %s\n' access_token "$multiword_credential_value" > "$current_repo/tracked.txt"
+expect_reject "unquoted multiword YAML credential assignment fails" scan
+git -C "$current_repo" restore tracked.txt
+
 printf '%s = "%s"\n' password "$credential_value" > "$current_repo/tracked.txt"
 expect_reject "TOML spaced credential assignment fails" scan
 git -C "$current_repo" restore tracked.txt
