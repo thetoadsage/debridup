@@ -39,6 +39,11 @@ class FakeElement {
         else classes.delete(name);
       },
     };
+    const properties = new Map();
+    this.style = {
+      setProperty: (name, value) => properties.set(name, String(value)),
+      getPropertyValue: name => properties.get(name) ?? '',
+    };
   }
 
   addEventListener(type, listener) {
@@ -66,6 +71,14 @@ class FakeElement {
 
   removeAttribute(name) {
     this.attributes.delete(name);
+  }
+
+  // This fake never parses innerHTML into a real tree, so it has no
+  // descendants to match. Existing per-instance overrides (e.g. the drawer
+  // fixture) still take precedence, since an assigned instance property
+  // shadows this prototype method.
+  querySelectorAll() {
+    return [];
   }
 
   focus() {
@@ -350,7 +363,10 @@ test('renders the maximum server bucket count into a bounded pulse grid', () => 
   }]);
 
   assert.equal((markup.match(/<button/g) || []).length, 96);
-  assert.match(markup, /--pulse-bucket-count:96/);
+  // Bucket count is applied by the caller through the CSSOM, not emitted as
+  // markup here: a strict style-src CSP blocks a literal style="" attribute,
+  // even one written by trusted app code. See the startDashboard test below.
+  assert.doesNotMatch(markup, /style=/);
   assert.match(markup, /class="pulse-track"[^>]*role="toolbar"/);
 
   // Roving tabindex: the whole row is one tab stop, not 96.
@@ -895,5 +911,28 @@ test('a throwing onRefresh cannot break the dashboard refresh loop', async () =>
   await flushPromises();
   assert.equal(calls, 2);
   assert.match(document.getElementById('dashboard-status').innerHTML, /Updated/);
+  dashboard.stop();
+});
+
+// Regression: a strict style-src Content-Security-Policy silently drops any
+// style="" attribute, including one written by the app itself. renderPulse's
+// buckets used to rely on style="--pulse-bucket-count:N" per row; blocked,
+// .pulse-track's grid-template-columns fell back to a single column, and
+// every bucket stacked into its own row — 96 rows instead of 96 columns.
+// The count must instead be applied through the CSSOM (style.setProperty),
+// which a strict CSP does not intercept.
+test('sets the pulse bucket count through the CSSOM rather than inline style markup', async () => {
+  const document = new FakeDashboardDocument();
+  const window = new FakeDashboardWindow();
+  const dashboard = startDashboard({
+    api: () => Promise.resolve(dashboardPayload()),
+    document,
+    window,
+  });
+  await dashboard.ready;
+
+  const pulse = document.getElementById('provider-pulse');
+  assert.equal(pulse.style.getPropertyValue('--pulse-bucket-count'), '2');
+  assert.doesNotMatch(pulse.innerHTML, /style=/);
   dashboard.stop();
 });

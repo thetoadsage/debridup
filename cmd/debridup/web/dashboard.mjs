@@ -65,14 +65,21 @@ function renderIncidents(element, incidents) {
 
 function renderAvailabilityComparison(element, providers) {
   if (!element) return;
-  element.innerHTML = providers.length
-    ? providers.map(provider => {
-      const width = Number.isFinite(provider.availability)
-        ? Math.max(0, Math.min(100, provider.availability))
-        : 0;
-      return `<div class="bar-row"><span>${escapeHTML(provider.name || 'Unnamed provider')}</span><div class="bar"><i style="width:${width}%"></i></div><strong>${escapeHTML(provider.availabilityLabel)}</strong></div>`;
-    }).join('')
-    : '<p class="muted">Availability appears after authenticated checks run.</p>';
+  if (!providers.length) {
+    element.innerHTML = '<p class="muted">Availability appears after authenticated checks run.</p>';
+    return;
+  }
+  element.innerHTML = providers.map(provider => {
+    const width = Number.isFinite(provider.availability)
+      ? Math.max(0, Math.min(100, provider.availability))
+      : 0;
+    return `<div class="bar-row"><span>${escapeHTML(provider.name || 'Unnamed provider')}</span><div class="bar"><i data-width="${width}"></i></div><strong>${escapeHTML(provider.availabilityLabel)}</strong></div>`;
+  }).join('');
+  // A strict style-src CSP blocks style="width:...%" as an inline style, so
+  // the width is set through the CSSOM instead, which is unaffected.
+  for (const bar of element.querySelectorAll('.bar > i[data-width]')) {
+    bar.style.setProperty('width', `${bar.dataset.width}%`);
+  }
 }
 
 function setBusy(elements, value) {
@@ -176,7 +183,11 @@ export function startDashboard({api, document, window, timeZone, onRefresh} = {}
     const restoreScroll = restoreBucketRow?.scrollLeft ?? 0;
 
     renderSummary(summary, model);
-    if (pulse) pulse.innerHTML = renderPulse(model.providers, displayTimeZone);
+    if (pulse) {
+      pulse.innerHTML = renderPulse(model.providers, displayTimeZone);
+      const bucketCount = model.providers[0]?.series?.length;
+      pulse.style.setProperty('--pulse-bucket-count', Number.isFinite(bucketCount) && bucketCount > 0 ? String(bucketCount) : '1');
+    }
     renderProviderTable(providerTable, model.providers);
     if (latency) {
       latency.innerHTML = renderLatencyChart(model.providers, displayTimeZone);

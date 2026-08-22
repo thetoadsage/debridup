@@ -251,6 +251,17 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .chart-legend li { display: inline-flex; align-items: center; gap: 6px; }
 .chart-legend li > span:last-child { color: var(--muted); }
 .legend-line { width: 18px; height: 3px; border-radius: 99px; }
+/* Colors mirror CHART_COLORS in chart.mjs, which also drives the SVG stroke
+   and fill attributes (unaffected by CSP style-src, since those are SVG
+   presentation attributes rather than a style="" attribute). A strict
+   style-src blocks inline style="background:...", so the swatch reads its
+   color from a class instead. */
+.legend-color-0 { background: #56a9ff; }
+.legend-color-1 { background: #35d19d; }
+.legend-color-2 { background: #ffbe58; }
+.legend-color-3 { background: #ff7182; }
+.legend-color-4 { background: #a78bfa; }
+.legend-color-5 { background: #22d3ee; }
 .chart-table-scroll { margin: 16px 0 0; border: 1px solid var(--border); border-radius: var(--control-radius); }
 .chart-summary { width: 100%; min-width: 430px; border-collapse: collapse; font-size: 11px; }
 .chart-summary caption { padding: 9px 11px; color: var(--muted); text-align: left; }
