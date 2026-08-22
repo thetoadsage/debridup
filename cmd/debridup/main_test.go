@@ -52,11 +52,30 @@ func TestDashboardHTMLContainsAccessibleLandmarks(t *testing.T) {
 	for _, required := range []string{
 		`<nav aria-label="Primary">`, `id="range-controls"`, `id="summary"`,
 		`id="provider-pulse"`, `id="provider-table-body"`, `id="latency-chart"`,
-		`id="provider-drawer"`, `aria-live="polite"`,
+		`id="incidents"`, `id="provider-drawer"`, `id="dashboard-status"`,
+		`aria-live="polite"`,
 	} {
 		if !strings.Contains(html, required) {
 			t.Errorf("missing %s", required)
 		}
+	}
+}
+
+func TestDashboardAssetsContainResponsiveMonitorDialog(t *testing.T) {
+	htmlBytes, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(htmlBytes), `<dialog id="monitor-dialog">`) {
+		t.Fatal("monitor management dialog is missing")
+	}
+
+	cssBytes, err := webFS.ReadFile("web/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cssBytes), "dialog .form { min-width: 0; width: 100%; }") {
+		t.Fatal("monitor dialog form must shrink to the dialog content width")
 	}
 }
 
