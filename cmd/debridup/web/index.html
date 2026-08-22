@@ -148,7 +148,6 @@
               <span class="skeleton chart-line-placeholder line-three"></span>
             </div>
           </div>
-          <p class="sr-only">Latency comparison data is loading.</p>
         </section>
 
         <section id="incidents-panel" class="panel dashboard-panel incidents-panel" aria-labelledby="incidents-heading">
@@ -230,14 +229,15 @@
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
       </button>
     </div>
-    <p class="state checking">Checking</p>
+    <p class="state checking" data-drawer-state>Checking</p>
     <dl class="drawer-metrics">
-      <div><dt>State duration</dt><dd>Loading…</dd></div>
-      <div><dt>Availability</dt><dd>Loading…</dd></div>
-      <div><dt>p50 latency</dt><dd>Loading…</dd></div>
-      <div><dt>p95 latency</dt><dd>Loading…</dd></div>
-      <div><dt>Last successful check</dt><dd>Loading…</dd></div>
-      <div><dt>Slowest check</dt><dd>Loading…</dd></div>
+      <div><dt>State duration</dt><dd data-drawer-value="state-duration">Loading…</dd></div>
+      <div><dt>Availability</dt><dd data-drawer-value="availability">Loading…</dd></div>
+      <div><dt>p50 latency</dt><dd data-drawer-value="p50">Loading…</dd></div>
+      <div><dt>p95 latency</dt><dd data-drawer-value="p95">Loading…</dd></div>
+      <div><dt>Last successful check</dt><dd data-drawer-value="last-check">Loading…</dd></div>
+      <div><dt>Slowest check</dt><dd data-drawer-value="slowest">Loading…</dd></div>
+      <div class="drawer-metric-wide"><dt>Latest event</dt><dd data-drawer-value="latest-event">Loading…</dd></div>
     </dl>
     <section class="drawer-events" aria-labelledby="drawer-events-heading">
       <h3 id="drawer-events-heading">Recent incidents</h3>
@@ -276,6 +276,6 @@
     </form>
   </dialog>
 
-  <script src="/app.js"></script>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>
