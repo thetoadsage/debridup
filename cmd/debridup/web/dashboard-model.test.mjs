@@ -641,6 +641,33 @@ test('sidebar navigation follows clicks, hashes, and the visible section', () =>
   navigation.stop();
 });
 
+test('renders a transient timeout as a possible degradation without an outage label', async () => {
+  const document = new FakeDashboardDocument();
+  const window = new FakeDashboardWindow();
+  const dashboard = startDashboard({
+    api: () => Promise.resolve(dashboardPayload({
+      incidents: [{
+        id: -1,
+        monitorId: 1,
+        name: 'TorBox',
+        summary: 'Authenticated check took 15.0s and exceeded the 15s timeout.',
+        openedAt: 1787320740,
+        latestState: 'degraded',
+        transient: true,
+      }],
+    })),
+    document,
+    window,
+  });
+  await dashboard.ready;
+
+  const markup = document.getElementById('incidents').innerHTML;
+  assert.match(markup, /Possible degradation/);
+  assert.match(markup, /Notification not sent; failure threshold not reached/);
+  assert.doesNotMatch(markup, /Ongoing/);
+  dashboard.stop();
+});
+
 test('offers four named themes and falls back safely to graphite', () => {
   assert.deepEqual(Object.keys(THEMES), ['graphite', 'neo-tokyo', 'sakura', 'terminal']);
   assert.equal(normalizeTheme('sakura'), 'sakura');

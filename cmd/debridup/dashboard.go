@@ -23,6 +23,7 @@ type dashboardSample struct {
 	Source     string    `json:"source"`
 	State      string    `json:"state"`
 	DurationMS int64     `json:"durationMs"`
+	ErrorCode  string    `json:"-"`
 	CheckedAt  time.Time `json:"checkedAt"`
 }
 
@@ -74,6 +75,7 @@ type dashboardIncident struct {
 	InitialState string `json:"initialState"`
 	LatestState  string `json:"latestState"`
 	Summary      string `json:"summary"`
+	Transient    bool   `json:"transient,omitempty"`
 }
 
 type apiError struct {
@@ -129,6 +131,14 @@ func dashboardDisplayState(current, lastRaw string) string {
 		return stateDegraded
 	}
 	return current
+}
+
+func transientDegradationSummary(sample dashboardSample, timeoutSeconds int) string {
+	duration := fmt.Sprintf("%.1fs", float64(sample.DurationMS)/1000)
+	if timeoutSeconds > 0 {
+		return fmt.Sprintf("Authenticated check took %s and exceeded the %ds timeout. Possible degraded service; no notification was sent because the failure threshold has not been reached.", duration, timeoutSeconds)
+	}
+	return fmt.Sprintf("Authenticated check timed out after %s. Possible degraded service; no notification was sent because the failure threshold has not been reached.", duration)
 }
 
 func aggregateSeries(samples []dashboardSample, spec dashboardRange, start, end time.Time) []dashboardPoint {
@@ -196,12 +206,13 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 		enabled        bool
 		lastRawState   string
 		failureStarted *int64
+		timeoutSeconds int
 	}
 	providers := make([]providerState, 0)
 	samplesByMonitor := make(map[int64][]dashboardSample)
 	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	err := a.withReadOnlyDashboardTransaction(ctx, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `SELECT m.id,m.name,m.provider,m.enabled,s.current_state,s.state_since,s.last_raw_state,s.failure_started_at,s.last_check_at
+		rows, err := tx.QueryContext(ctx, `SELECT m.id,m.name,m.provider,m.enabled,m.timeout_seconds,s.current_state,s.state_since,s.last_raw_state,s.failure_started_at,s.last_check_at
 		FROM monitors m LEFT JOIN monitor_states s ON s.monitor_id=m.id ORDER BY m.id`)
 		if err != nil {
 			return fmt.Errorf("load dashboard providers: %w", err)
@@ -210,7 +221,7 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 			var currentState, lastRawState sql.NullString
 			var stateSince, failureStarted, lastCheck sql.NullInt64
 			var provider providerState
-			if err := rows.Scan(&provider.provider.ID, &provider.provider.Name, &provider.provider.Provider, &provider.enabled, &currentState, &stateSince, &lastRawState, &failureStarted, &lastCheck); err != nil {
+			if err := rows.Scan(&provider.provider.ID, &provider.provider.Name, &provider.provider.Provider, &provider.enabled, &provider.timeoutSeconds, &currentState, &stateSince, &lastRawState, &failureStarted, &lastCheck); err != nil {
 				rows.Close()
 				return fmt.Errorf("scan dashboard provider: %w", err)
 			}
@@ -239,7 +250,7 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 			return fmt.Errorf("close dashboard providers: %w", err)
 		}
 
-		rows, err = tx.QueryContext(ctx, `SELECT monitor_id,source,state,duration_ms,checked_at
+		rows, err = tx.QueryContext(ctx, `SELECT monitor_id,source,state,duration_ms,COALESCE(error_code,''),checked_at
 		FROM check_results WHERE source='authenticated' AND checked_at>=? AND checked_at<?
 		ORDER BY monitor_id,checked_at,id`, start.Unix(), now.Unix())
 		if err != nil {
@@ -248,7 +259,7 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 		for rows.Next() {
 			var monitorID, checkedAt int64
 			var sample dashboardSample
-			if err := rows.Scan(&monitorID, &sample.Source, &sample.State, &sample.DurationMS, &checkedAt); err != nil {
+			if err := rows.Scan(&monitorID, &sample.Source, &sample.State, &sample.DurationMS, &sample.ErrorCode, &checkedAt); err != nil {
 				rows.Close()
 				return fmt.Errorf("scan dashboard check: %w", err)
 			}
@@ -327,6 +338,22 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 			provider.provider.P95MS = nearestRank(latencies, .95)
 			provider.provider.SlowestMS = int64Pointer(slowest)
 		}
+		if provider.provider.State == stateDegraded && len(samples) > 0 {
+			latest := samples[len(samples)-1]
+			if latest.ErrorCode == "timeout" {
+				response.Incidents = append(response.Incidents, dashboardIncident{
+					ID:          -provider.provider.ID,
+					MonitorID:   provider.provider.ID,
+					Name:        provider.provider.Name,
+					Provider:    provider.provider.Provider,
+					OpenedAt:    latest.CheckedAt.Unix(),
+					DetectedAt:  latest.CheckedAt.Unix(),
+					LatestState: stateDegraded,
+					Summary:     transientDegradationSummary(latest, provider.timeoutSeconds),
+					Transient:   true,
+				})
+			}
+		}
 
 		if provider.enabled {
 			switch {
@@ -343,6 +370,12 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 		}
 		response.Providers = append(response.Providers, provider.provider)
 	}
+	sort.SliceStable(response.Incidents, func(i, j int) bool {
+		if response.Incidents[i].OpenedAt == response.Incidents[j].OpenedAt {
+			return response.Incidents[i].ID > response.Incidents[j].ID
+		}
+		return response.Incidents[i].OpenedAt > response.Incidents[j].OpenedAt
+	})
 	return response, nil
 }
 

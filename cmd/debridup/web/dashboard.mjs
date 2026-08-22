@@ -53,8 +53,13 @@ function renderIncidents(element, incidents) {
   }
   element.innerHTML = incidents.map(incident => {
     const state = safeState(incident.latestState);
-    const resolution = Number.isFinite(incident.resolvedAt) ? 'Resolved' : 'Ongoing';
-    return `<article class="incident"><div class="incident-heading"><strong>${escapeHTML(incident.name || 'Provider incident')}</strong><span class="state ${state}">${escapeHTML(incident.stateLabel)}</span><span class="incident-resolution ${resolution === 'Resolved' ? 'resolved' : 'open'}">${resolution}</span></div><p class="incident-summary">${escapeHTML(incident.summary || 'Provider state changed.')}</p><p class="incident-meta">Started ${escapeHTML(incident.openedAtLabel)}${resolution === 'Resolved' ? ` · Recovered ${escapeHTML(incident.resolvedAtLabel)}` : ''}</p></article>`;
+    const transient = Boolean(incident.transient);
+    const resolution = transient ? 'Possible degradation' : Number.isFinite(incident.resolvedAt) ? 'Resolved' : 'Ongoing';
+    const resolutionClass = transient ? 'degraded' : resolution === 'Resolved' ? 'resolved' : 'open';
+    const timing = transient
+      ? `Detected ${escapeHTML(incident.openedAtLabel)} · Notification not sent; failure threshold not reached.`
+      : `Started ${escapeHTML(incident.openedAtLabel)}${resolution === 'Resolved' ? ` · Recovered ${escapeHTML(incident.resolvedAtLabel)}` : ''}`;
+    return `<article class="incident"><div class="incident-heading"><strong>${escapeHTML(incident.name || 'Provider incident')}</strong><span class="state ${state}">${escapeHTML(incident.stateLabel)}</span><span class="incident-resolution ${resolutionClass}">${resolution}</span></div><p class="incident-summary">${escapeHTML(incident.summary || 'Provider state changed.')}</p><p class="incident-meta">${timing}</p></article>`;
   }).join('');
 }
 

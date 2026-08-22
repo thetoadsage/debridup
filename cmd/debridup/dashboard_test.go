@@ -231,6 +231,45 @@ func TestDashboardSnapshotShowsUnconfirmedLatestFailureAsDegraded(t *testing.T) 
 	}
 }
 
+func TestDashboardSnapshotAddsTransientTimeoutDegradationWithoutIncident(t *testing.T) {
+	a := testApp(t)
+	if err := migrateDatabase(context.Background(), a.db); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	result, err := a.db.Exec(`INSERT INTO monitors(provider,name,enabled,timeout_seconds,created_at,updated_at) VALUES(?,?,?,?,?,?)`, "torbox", "TorBox", 1, 15, now.Unix(), now.Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitorID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkedAt := now.Add(-time.Minute).Unix()
+	if _, err := a.db.Exec(`INSERT INTO monitor_states(monitor_id,current_state,state_since,last_raw_state,failure_started_at,last_check_at) VALUES(?,?,?,?,?,?)`, monitorID, stateHealthy, now.Add(-time.Hour).Unix(), stateConnection, checkedAt, checkedAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`INSERT INTO check_results(monitor_id,source,state,duration_ms,error_code,checked_at) VALUES(?,?,?,?,?,?)`, monitorID, "authenticated", stateConnection, 15000, "timeout", checkedAt); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, _ := parseDashboardRange("24h")
+	got, err := a.dashboardSnapshot(context.Background(), spec, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Incidents) != 1 {
+		t.Fatalf("incidents=%#v", got.Incidents)
+	}
+	incident := got.Incidents[0]
+	if !incident.Transient || incident.LatestState != stateDegraded || !strings.Contains(incident.Summary, "15.0s") || !strings.Contains(incident.Summary, "no notification was sent") {
+		t.Fatalf("incident=%#v", incident)
+	}
+	if got.Summary.ActiveIncidents != 0 {
+		t.Fatalf("summary=%#v", got.Summary)
+	}
+}
+
 func TestDashboardSnapshotUsesOneReadOnlyTransactionAndThreeBulkQueries(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dashboard.db")
 	seedDB, err := openDatabase(path)
