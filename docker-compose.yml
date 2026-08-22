@@ -24,6 +24,7 @@ services:
 
 secrets:
   encryption_key:
+    # Keep this host file root:root mode 0400 as documented in README.md.
     file: ./secrets/encryption_key
 
 volumes:

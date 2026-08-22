@@ -10,10 +10,13 @@ All authenticated checks are read-only account or history requests. Most provide
 2. Create a 32-byte encryption key:
 
    ```sh
-   mkdir -p secrets
-   openssl rand -base64 32 > secrets/encryption_key
-   chmod 600 secrets/encryption_key
+   sudo install -d -m 0700 -o root -g root secrets
+   openssl rand -base64 32 | sudo tee secrets/encryption_key > /dev/null
+   sudo chown root:root secrets/encryption_key
+   sudo chmod 0400 secrets/encryption_key
    ```
+
+   Compose bind-mounts this file without changing its host ownership or mode. The root-owned directory and key let the capability-restricted startup process open only this secret before it drops to the application user. Do not make the file group- or world-readable. If the key already exists, correct its ownership and mode with the last two commands instead of generating a replacement.
 
 3. Start it:
 
@@ -38,7 +41,7 @@ Use the [Unraid guide](unraid/README.md) for the short key-generation and templa
 
 - API keys and notification endpoints are encrypted with XChaCha20-Poly1305 before reaching SQLite.
 - The encryption key is loaded from a file/secret and is never persisted in the database.
-- The container entrypoint reads the root-mounted Docker secret, then drops privileges before starting the application.
+- The container entrypoint opens the root-owned, read-only Docker secret, then drops privileges before starting the application.
 - Secrets are write-only in the API and are never sent to the browser.
 - The app is single-admin; its initial password is supplied through `DEBRIDUP_ADMIN_PASSWORD` and stored as an Argon2id hash.
 - SQLite runs in WAL mode. Back up using SQLite's online backup mechanism, not by copying only the database file while the app is live.

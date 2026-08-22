@@ -232,7 +232,7 @@ set -eu
 	if err := os.WriteFile(fakeSuExec, []byte(probeScript), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	entrypoint := executableEntrypointForTest(t, tempDir)
+	entrypoint := executableEntrypointForTest(t)
 	command := exec.Command("sh", entrypoint)
 	command.Env = []string{
 		"PATH=" + tempDir + string(os.PathListSeparator) + os.Getenv("PATH"),
@@ -263,7 +263,7 @@ func TestEntrypointFailsBeforePrivilegeDropWhenSecretFileIsMissing(t *testing.T)
 	if err := os.WriteFile(fakeSuExec, []byte("#!/bin/sh\n: > \"$ENTRYPOINT_PROBE_OUTPUT\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	entrypoint := executableEntrypointForTest(t, tempDir)
+	entrypoint := executableEntrypointForTest(t)
 	command := exec.Command("sh", entrypoint)
 	command.Env = []string{
 		"PATH=" + tempDir + string(os.PathListSeparator) + os.Getenv("PATH"),
@@ -280,7 +280,55 @@ func TestEntrypointFailsBeforePrivilegeDropWhenSecretFileIsMissing(t *testing.T)
 	}
 }
 
-func executableEntrypointForTest(t *testing.T, tempDir string) string {
+func TestEntrypointCheckoutIsLFOnlyAndValidShell(t *testing.T) {
+	entrypoint, err := filepath.Abs(filepath.Join("..", "..", "docker-entrypoint.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entrypointBytes, err := os.ReadFile(entrypoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.ContainsRune(entrypointBytes, '\r') {
+		t.Fatal("docker-entrypoint.sh contains a carriage return")
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	shell, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("entrypoint syntax check requires a POSIX shell")
+	}
+	if output, err := exec.Command(shell, "-n", entrypoint).CombinedOutput(); err != nil {
+		t.Fatalf("docker-entrypoint.sh syntax check failed: %v: %s", err, output)
+	}
+}
+
+func TestComposeDocumentationCreatesRootOnlySecret(t *testing.T) {
+	readmePath, err := filepath.Abs(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	readmeBytes, err := os.ReadFile(readmePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readme := string(readmeBytes)
+	for _, required := range []string{
+		"sudo install -d -m 0700 -o root -g root secrets",
+		"chown root:root secrets/encryption_key",
+		"chmod 0400 secrets/encryption_key",
+	} {
+		if !strings.Contains(readme, required) {
+			t.Errorf("Compose secret setup is missing %q", required)
+		}
+	}
+	if strings.Contains(readme, "chmod 600 secrets/encryption_key") {
+		t.Fatal("Compose secret setup leaves the key owned by the invoking user")
+	}
+}
+
+func executableEntrypointForTest(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("entrypoint requires a POSIX shell")
@@ -292,15 +340,7 @@ func executableEntrypointForTest(t *testing.T, tempDir string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entrypointBytes, err := os.ReadFile(entrypointSource)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entrypoint := filepath.Join(tempDir, "docker-entrypoint")
-	if err := os.WriteFile(entrypoint, bytes.ReplaceAll(entrypointBytes, []byte("\r\n"), []byte("\n")), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return entrypoint
+	return entrypointSource
 }
 
 func TestSendNtfy(t *testing.T) {
