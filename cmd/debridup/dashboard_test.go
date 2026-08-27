@@ -41,6 +41,212 @@ func TestDashboardEndpointReturnsConsolidatedSnapshot(t *testing.T) {
 	}
 }
 
+func TestCurrentStatusMarksSlowWithoutChangingIncidentState(t *testing.T) {
+	a := testApp(t)
+	if err := migrateDatabase(context.Background(), a.db); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Unix()
+	result, err := a.db.Exec(`INSERT INTO monitors(provider,name,timeout_seconds,created_at,updated_at) VALUES(?,?,?,?,?)`, "torbox", "TorBox", 10, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := result.LastInsertId()
+	if _, err := a.db.Exec(`INSERT INTO monitor_states(monitor_id,current_state,state_since,last_raw_state,last_check_at) VALUES(?,?,?,?,?)`, id, stateHealthy, now, stateHealthy, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`INSERT INTO check_results(monitor_id,source,state,duration_ms,checked_at) VALUES(?,?,?,?,?)`, id, "authenticated", stateHealthy, 8000, now); err != nil {
+		t.Fatal(err)
+	}
+	req := authenticatedRequest(t, a, http.MethodGet, "/api/dashboard")
+	rr := httptest.NewRecorder()
+	a.routes().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var got currentStatusResponse
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Providers) != 1 || got.Providers[0].State != "slow" || got.Summary.ProvidersOnline != 1 || got.Summary.ActiveIncidents != 0 {
+		t.Fatalf("status=%#v", got)
+	}
+}
+
+func TestCurrentStatusShowsDisabledMonitorAsPaused(t *testing.T) {
+	a := testApp(t)
+	if err := migrateDatabase(context.Background(), a.db); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Unix()
+	result, err := a.db.Exec(`INSERT INTO monitors(provider,name,enabled,created_at,updated_at) VALUES(?,?,?,?,?)`, "torbox", "Paused", 0, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := result.LastInsertId()
+	if _, err := a.db.Exec(`INSERT INTO monitor_states(monitor_id,current_state,state_since,last_raw_state,last_check_at) VALUES(?,?,?,?,?)`, id, stateHealthy, now, stateHealthy, now); err != nil {
+		t.Fatal(err)
+	}
+	got, err := a.currentStatus(context.Background(), time.Unix(now, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Providers) != 1 || got.Providers[0].State != "paused" || got.Providers[0].Enabled || got.Summary.ProvidersOnline != 0 || got.Summary.OverallState != "unknown" {
+		t.Fatalf("status=%#v", got)
+	}
+}
+
+func TestCheckLogCursorUsesTimestampAndIDTuple(t *testing.T) {
+	a := testApp(t)
+	if err := migrateDatabase(context.Background(), a.db); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	res, err := a.db.Exec(`INSERT INTO monitors(provider,name,created_at,updated_at) VALUES(?,?,?,?)`, "torbox", "TorBox", now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitorID, _ := res.LastInsertId()
+	// IDs increase in insertion order while timestamps intentionally do not.
+	for _, checked := range []int64{100, 300, 200} {
+		if _, err := a.db.Exec(`INSERT INTO check_results(monitor_id,source,state,duration_ms,checked_at) VALUES(?,?,?,?,?)`, monitorID, "authenticated", stateHealthy, 1, checked); err != nil {
+			t.Fatal(err)
+		}
+	}
+	get := func(path string) struct {
+		Checks     []checkLogRow `json:"checks"`
+		NextBefore *string       `json:"nextBefore"`
+	} {
+		rr := httptest.NewRecorder()
+		a.routes().ServeHTTP(rr, authenticatedRequest(t, a, http.MethodGet, path))
+		if rr.Code != 200 {
+			t.Fatalf("%d %s", rr.Code, rr.Body.String())
+		}
+		var got struct {
+			Checks     []checkLogRow `json:"checks"`
+			NextBefore *string       `json:"nextBefore"`
+		}
+		if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	first := get("/api/checks?limit=2")
+	if len(first.Checks) != 2 || first.NextBefore == nil {
+		t.Fatalf("first=%#v", first)
+	}
+	second := get("/api/checks?limit=2&before=" + *first.NextBefore)
+	if len(second.Checks) != 1 {
+		t.Fatalf("second=%#v", second)
+	}
+	seen := map[int64]bool{}
+	for _, c := range append(first.Checks, second.Checks...) {
+		if seen[c.ID] {
+			t.Fatalf("duplicate %d", c.ID)
+		}
+		seen[c.ID] = true
+	}
+	if len(seen) != 3 {
+		t.Fatalf("seen=%v", seen)
+	}
+}
+
+func TestCheckLogAssociatesChecksInsideIncidentWindow(t *testing.T) {
+	a := testApp(t)
+	if err := migrateDatabase(context.Background(), a.db); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	res, err := a.db.Exec(`INSERT INTO monitors(provider,name,created_at,updated_at) VALUES(?,?,?,?)`, "torbox", "TorBox", now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitorID, _ := res.LastInsertId()
+	incident, err := a.db.Exec(`INSERT INTO incidents(monitor_id,opened_at,detected_at,resolved_at,initial_state,latest_state,summary) VALUES(?,?,?,?,?,?,?)`, monitorID, 100, 110, 200, stateAPI, stateHealthy, "Recovered")
+	if err != nil {
+		t.Fatal(err)
+	}
+	incidentID, _ := incident.LastInsertId()
+	if _, err := a.db.Exec(`INSERT INTO check_results(monitor_id,source,state,duration_ms,error_code,checked_at) VALUES(?,?,?,?,?,?)`, monitorID, "authenticated", stateAPI, 250, "server_error", 150); err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	a.routes().ServeHTTP(rr, authenticatedRequest(t, a, http.MethodGet, "/api/checks?limit=10"))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Checks []checkLogRow `json:"checks"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Checks) != 1 || got.Checks[0].IncidentID == nil || *got.Checks[0].IncidentID != incidentID || got.Checks[0].ErrorCode == nil || *got.Checks[0].ErrorCode != "server_error" {
+		t.Fatalf("checks=%#v", got.Checks)
+	}
+}
+
+func TestReportRanges(t *testing.T) {
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	for _, value := range []string{"1d", "7d", "30d", "90d", "all"} {
+		t.Run(value, func(t *testing.T) {
+			start, label, err := reportRange(value, now)
+			if err != nil || label == "" || start.After(now) {
+				t.Fatalf("start=%v label=%q err=%v", start, label, err)
+			}
+		})
+	}
+	if _, _, err := reportRange("24h", now); err == nil {
+		t.Fatal("unsupported report range was accepted")
+	}
+}
+
+func TestReportIsSafeAndUsesAuthenticatedStatistics(t *testing.T) {
+	a := testApp(t)
+	if err := migrateDatabase(context.Background(), a.db); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Unix()
+	res, err := a.db.Exec(`INSERT INTO monitors(provider,name,created_at,updated_at) VALUES(?,?,?,?)`, "torbox", `<Unsafe & Service>`, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitorID, _ := res.LastInsertId()
+	checks := []struct {
+		source, state, code string
+		duration            int64
+	}{
+		{"authenticated", stateHealthy, "", 100},
+		{"authenticated", stateAPI, `<server_error>`, 300},
+		{"public", stateHealthy, "", 1000},
+	}
+	for index, check := range checks {
+		if _, err := a.db.Exec(`INSERT INTO check_results(monitor_id,source,state,duration_ms,error_code,checked_at) VALUES(?,?,?,?,?,?)`, monitorID, check.source, check.state, check.duration, nullString(check.code), now-int64(index)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rr := httptest.NewRecorder()
+	a.routes().ServeHTTP(rr, authenticatedRequest(t, a, http.MethodGet, "/api/report?range=all"))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Disposition"); !strings.Contains(got, "attachment") || !strings.Contains(got, ".html") {
+		t.Fatalf("content-disposition=%q", got)
+	}
+	if got := rr.Header().Get("Content-Security-Policy"); !strings.Contains(got, "style-src 'unsafe-inline'") || !strings.Contains(got, "default-src 'none'") {
+		t.Fatalf("csp=%q", got)
+	}
+	body := rr.Body.String()
+	for _, expected := range []string{"&lt;Unsafe &amp; Service&gt;", "Authenticated availability: 50.00% (2 checks)", "Average latency: 200 ms", "maximum latency: 300 ms", "&lt;server_error&gt;"} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("report missing %q", expected)
+		}
+	}
+	if strings.Contains(body, `<Unsafe & Service>`) || strings.Contains(body, `<server_error>`) {
+		t.Fatal("report contains unescaped stored content")
+	}
+}
+
 func TestDashboardEndpointRejectsInvalidRange(t *testing.T) {
 	a := testApp(t)
 	req := authenticatedRequest(t, a, http.MethodGet, "/api/dashboard?range=1y")

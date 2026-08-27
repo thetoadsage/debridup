@@ -355,6 +355,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /login", a.login)
 	mux.HandleFunc("POST /logout", a.logout)
 	mux.HandleFunc("GET /api/dashboard", a.auth(a.dashboard))
+	mux.HandleFunc("GET /api/checks", a.auth(a.listAllChecks))
+	mux.HandleFunc("GET /api/report", a.auth(a.report))
 	mux.HandleFunc("GET /api/overview", a.auth(a.overview))
 	mux.HandleFunc("GET /api/monitors", a.auth(a.listMonitors))
 	mux.HandleFunc("POST /api/monitors", a.auth(a.createMonitor))

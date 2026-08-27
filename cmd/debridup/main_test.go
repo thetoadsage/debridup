@@ -443,9 +443,8 @@ func TestDashboardHTMLContainsAccessibleLandmarks(t *testing.T) {
 	}
 	html := string(b)
 	for _, required := range []string{
-		`<nav aria-label="Primary">`, `id="range-controls"`, `id="summary"`,
-		`id="provider-pulse"`, `id="provider-table-body"`, `id="latency-chart"`,
-		`id="incidents"`, `id="provider-drawer"`, `id="dashboard-status"`,
+		`<nav aria-label="Primary">`, `id="summary"`, `id="provider-table-body"`,
+		`id="check-log-body"`, `id="download-report"`, `id="report-range"`, `id="dashboard-status"`,
 		`aria-live="polite"`, `id="theme-select"`,
 	} {
 		if !strings.Contains(html, required) {
@@ -472,35 +471,28 @@ func TestDashboardAssetsContainResponsiveMonitorDialog(t *testing.T) {
 	}
 }
 
-func TestProviderDrawerLabelsTheLatestCheckAccurately(t *testing.T) {
+func TestCurrentHealthTableLabelsTheLatestCheckAccurately(t *testing.T) {
 	b, err := webFS.ReadFile("web/index.html")
 	if err != nil {
 		t.Fatal(err)
 	}
 	html := string(b)
-	if !strings.Contains(html, `<dt>Last check</dt>`) {
-		t.Fatal("provider drawer must label the API's lastCheck value as Last check")
+	if !strings.Contains(html, `<th scope="col">Last check</th>`) {
+		t.Fatal("current health table must label the API's lastCheck value as Last check")
 	}
 	if strings.Contains(html, `<dt>Last successful check</dt>`) {
-		t.Fatal("provider drawer must not describe lastCheck as successful")
+		t.Fatal("current health table must not describe lastCheck as successful")
 	}
 }
 
-func TestPulseStylesBoundMaximumHistoryWithoutColorOnlyMeaning(t *testing.T) {
+func TestResponseHistoryStylesUseAResponsiveTable(t *testing.T) {
 	b, err := webFS.ReadFile("web/app.css")
 	if err != nil {
 		t.Fatal(err)
 	}
 	css := string(b)
-	if !strings.Contains(css, `.pulse-track { display: grid; min-width: 0; max-width: 100%; overflow: hidden; grid-template-columns: repeat(var(--pulse-bucket-count, 1), minmax(0, 1fr));`) {
-		t.Fatal("pulse track must scale every server bucket inside its available width")
-	}
-	if !strings.Contains(css, `.pulse-rows { display: grid; gap: 5px; margin-top: 16px; }`) ||
-		!strings.Contains(css, `.pulse-bucket { display: grid; width: 100%; min-width: 0; height: 14px;`) {
-		t.Fatal("pulse rows must remain compact as the provider count grows")
-	}
-	if strings.Count(css, "repeating-linear-gradient") < 4 {
-		t.Fatal("pulse states must use distinct visible patterns in addition to color")
+	if !strings.Contains(css, `.table-scroll { overflow-x: auto;`) {
+		t.Fatal("response history must remain usable on narrow screens")
 	}
 }
 

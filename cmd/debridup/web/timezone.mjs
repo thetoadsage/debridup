@@ -12,9 +12,9 @@ const FORMAT_OPTIONS = Object.freeze({
 });
 
 // Constructing an Intl.DateTimeFormat is orders of magnitude more expensive
-// than formatting with an existing one, and the dashboard formats roughly one
-// timestamp per pulse bucket on every refresh. Cache per injected Intl object
-// so a test double still gets its own formatters.
+// than formatting with an existing one, and the dashboard formats many check
+// timestamps on every refresh. Cache per injected Intl object so a test double
+// still gets its own formatters.
 const formatterCache = new WeakMap();
 const validationCache = new WeakMap();
 const browserZoneCache = new WeakMap();

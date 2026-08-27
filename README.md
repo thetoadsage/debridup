@@ -35,23 +35,9 @@ Compose keeps `/data` writable while mounting only the encryption-key file read-
 
 ## Dashboard
 
-The dashboard starts at 24 hours and supports coordinated `24h`, `7d`, and `30d` ranges. Each range is returned by one authenticated `/api/dashboard` request and updates the summary, provider pulse, provider table, latency comparison, and incidents together. Buckets are pre-aggregated as checks are recorded and stored in `check_rollups`, so a refresh reads at most one summarised row per provider per bucket instead of re-reducing the raw check history. Bucket boundaries are anchored to the epoch, so a bucket holds the same checks between refreshes rather than shifting:
+The dashboard is intentionally current-state first: each configured service shows its status, latest authenticated latency, last check, and whether it has an active incident. A successful check is shown as **Slow** when it consumes at least 80% of that monitor's configured timeout. Slow is informational and never changes incident or notification thresholds.
 
-| Range | Bucket width | Maximum points per provider |
-| --- | ---: | ---: |
-| 24 hours | 15 minutes | 96 |
-| 7 days | 2 hours | 84 |
-| 30 days | 8 hours | 90 |
-
-Availability is the percentage of completed authenticated checks that succeeded in the selected range, and is exact. The slowest check shown for a provider is exact. Per-bucket p50 and p95 are exact nearest-rank values over the completed checks in that bucket.
-
-The p50 and p95 shown for a provider across the whole range are summary figures derived from those per-bucket percentiles, weighted by how many checks each bucket holds. An exact nearest-rank value over the whole range would require ordering every raw latency in the window on each refresh, which measured slower than the pre-aggregation it replaced; the derived figure stays close to it (within 6% on the project's test data, and asserted to stay within 15%). Per-bucket percentiles, availability, and the slowest check are unaffected.
-
-In the provider pulse, healthy means every completed check in the bucket succeeded, degraded means the bucket contains both successes and failures, outage means every completed check failed, and unknown means no completed check exists; unknown buckets are not counted as downtime.
-
-The dashboard refreshes every 30 seconds while its tab is visible, pauses while hidden, and refreshes immediately when the tab becomes visible again. A response more than 90 seconds old is labeled stale. If a later refresh fails, the last successful data remains visible with its age and a retry action; an initial failure shows an explicit unavailable state.
-
-Select a provider name or pulse bucket to open its detail drawer. The drawer includes state duration, availability, p50 and p95 latency, last and slowest checks, the latest event, and recent incidents. It traps keyboard focus while open, closes with Escape or its close control, and restores focus to the invoking control. Statuses use text, symbols, and patterns in addition to color; latency charts include a text table; motion is disabled when reduced motion is requested; and the layout adapts to tablet and mobile widths.
+The dashboard refreshes every 30 seconds while its tab is visible and refreshes when it becomes visible again. The response-history list contains both authenticated and public checks, uses **Load more** pagination, and shows associated incidents when available. Use **Report** to download a self-contained HTML report for 1, 7, 30, or 90 days, or all retained raw checks. “All” means the installed raw-check retention window (90 days by default), not all-time history; incident records may be retained longer.
 
 ## Runtime data and checks
 

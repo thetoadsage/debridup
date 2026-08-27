@@ -177,6 +177,10 @@ dashboard = startDashboard({
   },
 });
 
+$('#report-range').addEventListener('change', event => {
+  $('#download-report').href = `/api/report?range=${encodeURIComponent(event.target.value)}`;
+});
+
 $('#logout').addEventListener('click', async () => {
   await fetch('/logout', {method: 'POST'});
   window.location.assign('/login.html');

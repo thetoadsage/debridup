@@ -6,10 +6,8 @@
   <title>DebridUp</title>
   <script src="/theme-init.js"></script>
   <link rel="stylesheet" href="/app.css">
-  <link rel="stylesheet" href="/chart.css">
   <link rel="stylesheet" href="/notifications.css">
   <link rel="stylesheet" href="/provider-management.css">
-  <link rel="stylesheet" href="/incidents.css">
 </head>
 <body>
   <a class="skip-link" href="#dashboard-main">Skip to dashboard</a>
@@ -24,7 +22,7 @@
       <nav aria-label="Primary">
         <a class="nav-link active" href="#dashboard-main" aria-current="page">Dashboard</a>
         <a class="nav-link" href="#providers-panel">Providers</a>
-        <a class="nav-link" href="#incidents-panel">Incidents</a>
+        <a class="nav-link" href="#response-history">Response history</a>
         <a class="nav-link" href="#notification-settings">Settings</a>
       </nav>
 
@@ -51,11 +49,9 @@
           </p>
         </div>
         <div class="dashboard-actions">
-          <div id="range-controls" class="range-controls" role="group" aria-label="Dashboard time range">
-            <button class="range-button active" type="button" data-range="24h" aria-pressed="true">24 hours</button>
-            <button class="range-button" type="button" data-range="7d" aria-pressed="false">7 days</button>
-            <button class="range-button" type="button" data-range="30d" aria-pressed="false">30 days</button>
-          </div>
+          <label class="sr-only" for="report-range">Report period</label>
+          <select id="report-range" aria-label="Report period"><option value="1d">1 day</option><option value="7d">7 days</option><option value="30d">30 days</option><option value="90d">90 days</option><option value="all">All retained history</option></select>
+          <a id="download-report" class="button-link" href="/api/report?range=1d">Report</a>
           <button id="refresh" type="button">Refresh</button>
         </div>
       </header>
@@ -77,35 +73,14 @@
           <span class="skeleton skeleton-value" aria-hidden="true"></span>
           <span class="sr-only">Loading active incidents</span>
         </article>
-        <article class="summary-card">
-          <span class="summary-label">Checks completed today</span>
-          <span class="skeleton skeleton-value" aria-hidden="true"></span>
-          <span class="sr-only">Loading checks completed today</span>
-        </article>
-      </section>
-
-      <section id="provider-pulse" class="panel dashboard-panel pulse-panel" aria-labelledby="pulse-heading" aria-busy="true">
-        <div class="section-title">
-          <div>
-            <h2 id="pulse-heading">Provider pulse</h2>
-            <p class="muted">Health changes across the selected range.</p>
-          </div>
-          <span class="status-key"><span class="status-dot unknown" aria-hidden="true"></span>Loading status</span>
-        </div>
-        <div class="pulse-skeleton" aria-hidden="true">
-          <span class="skeleton skeleton-label"></span><span class="skeleton skeleton-track"></span>
-          <span class="skeleton skeleton-label"></span><span class="skeleton skeleton-track"></span>
-          <span class="skeleton skeleton-label"></span><span class="skeleton skeleton-track"></span>
-        </div>
       </section>
 
       <section id="providers-panel" class="panel dashboard-panel provider-table-panel" aria-labelledby="providers-heading">
         <div class="section-title">
           <div>
             <h2 id="providers-heading">Providers</h2>
-            <p class="muted">Current state and service-level performance.</p>
+            <p class="muted">Current service health. Slow means a successful check used at least 80% of its configured timeout.</p>
           </div>
-          <span class="table-hint">Select a provider for details</span>
         </div>
         <div class="table-scroll" tabindex="0" aria-label="Scrollable provider status table">
           <table class="provider-table">
@@ -114,11 +89,9 @@
               <tr>
                 <th scope="col">Provider</th>
                 <th scope="col">Status</th>
-                <th scope="col">Uptime</th>
-                <th scope="col">p50 latency</th>
-                <th scope="col">p95 latency</th>
+                <th scope="col">Latest latency</th>
                 <th scope="col">Last check</th>
-                <th scope="col">Recent status</th>
+                <th scope="col">Incident</th>
               </tr>
             </thead>
             <tbody id="provider-table-body" aria-busy="true">
@@ -126,15 +99,11 @@
                 <td><span class="skeleton skeleton-cell wide"></span></td>
                 <td><span class="skeleton skeleton-cell"></span></td>
                 <td><span class="skeleton skeleton-cell"></span></td>
-                <td><span class="skeleton skeleton-cell"></span></td>
-                <td><span class="skeleton skeleton-cell"></span></td>
                 <td><span class="skeleton skeleton-cell wide"></span></td>
                 <td><span class="skeleton skeleton-strip"></span></td>
               </tr>
               <tr class="skeleton-row" aria-hidden="true">
                 <td><span class="skeleton skeleton-cell wide"></span></td>
-                <td><span class="skeleton skeleton-cell"></span></td>
-                <td><span class="skeleton skeleton-cell"></span></td>
                 <td><span class="skeleton skeleton-cell"></span></td>
                 <td><span class="skeleton skeleton-cell"></span></td>
                 <td><span class="skeleton skeleton-cell wide"></span></td>
@@ -145,39 +114,11 @@
         </div>
       </section>
 
-      <div class="analytics-grid">
-        <section class="panel dashboard-panel latency-comparison" aria-labelledby="latency-heading">
-          <div class="section-title">
-            <div>
-              <h2 id="latency-heading">Latency comparison</h2>
-              <p class="muted">Response time in milliseconds.</p>
-            </div>
-          </div>
-          <div id="latency-chart" class="chart-stage" role="img" aria-label="Latency comparison chart loading" aria-busy="true">
-            <div class="chart-skeleton" aria-hidden="true">
-              <span class="skeleton chart-line-placeholder line-one"></span>
-              <span class="skeleton chart-line-placeholder line-two"></span>
-              <span class="skeleton chart-line-placeholder line-three"></span>
-            </div>
-          </div>
-        </section>
-
-        <section id="incidents-panel" class="panel dashboard-panel incidents-panel" aria-labelledby="incidents-heading">
-          <div class="section-title">
-            <div>
-              <h2 id="incidents-heading">Recent incidents</h2>
-              <p class="muted">Latest confirmed provider events.</p>
-            </div>
-          </div>
-          <div id="incidents" class="list" aria-live="polite">
-            <div class="incident-skeleton" aria-hidden="true">
-              <span class="skeleton skeleton-label"></span>
-              <span class="skeleton skeleton-copy"></span>
-              <span class="skeleton skeleton-copy short"></span>
-            </div>
-          </div>
-        </section>
-      </div>
+      <section id="response-history" class="panel dashboard-panel" aria-labelledby="checks-heading">
+        <div class="section-title"><div><h2 id="checks-heading">Response history</h2><p class="muted">Authenticated and public checks retained by this installation.</p></div></div>
+        <div class="table-scroll"><table class="provider-table"><caption class="sr-only">Chronological retained service responses</caption><thead><tr><th scope="col">Service</th><th scope="col">Source</th><th scope="col">Result</th><th scope="col">Latency</th><th scope="col">HTTP / error</th><th scope="col">Time</th><th scope="col">Incident</th></tr></thead><tbody id="check-log-body" aria-busy="true"></tbody></table></div>
+        <button id="load-more-checks" class="quiet" type="button" hidden>Load more</button>
+      </section>
 
       <section id="provider-management" class="panel dashboard-panel management-panel" aria-labelledby="management-heading">
         <div class="section-title">
@@ -191,10 +132,6 @@
           </div>
         </div>
         <div id="cards" class="cards management-grid"></div>
-        <div class="legacy-comparison">
-          <h3>Confirmed availability</h3>
-          <div id="comparison" class="comparison"></div>
-        </div>
       </section>
 
       <section id="notification-settings" class="panel dashboard-panel notification-panel" aria-labelledby="notifications-heading">
@@ -251,34 +188,6 @@
       </section>
     </main>
   </div>
-
-  <div id="provider-drawer-overlay" class="drawer-overlay" hidden></div>
-  <aside id="provider-drawer" class="provider-drawer" role="dialog" aria-modal="true" aria-labelledby="provider-drawer-title" aria-hidden="true" tabindex="-1" hidden>
-    <div class="drawer-header">
-      <div>
-        <h2 id="provider-drawer-title">Provider</h2>
-      </div>
-      <button id="provider-drawer-close" class="quiet close-button" type="button" aria-label="Close provider details">
-        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-      </button>
-    </div>
-    <p class="state checking" data-drawer-state>Checking</p>
-    <dl class="drawer-metrics">
-      <div><dt>State duration</dt><dd data-drawer-value="state-duration">Loading…</dd></div>
-      <div><dt>Availability</dt><dd data-drawer-value="availability">Loading…</dd></div>
-      <div><dt>p50 latency</dt><dd data-drawer-value="p50">Loading…</dd></div>
-      <div><dt>p95 latency</dt><dd data-drawer-value="p95">Loading…</dd></div>
-      <div><dt>Last check</dt><dd data-drawer-value="last-check">Loading…</dd></div>
-      <div><dt>Slowest check</dt><dd data-drawer-value="slowest">Loading…</dd></div>
-      <div class="drawer-metric-wide"><dt>Latest event</dt><dd data-drawer-value="latest-event">Loading…</dd></div>
-    </dl>
-    <section class="drawer-events" aria-labelledby="drawer-events-heading">
-      <h3 id="drawer-events-heading">Recent incidents</h3>
-      <ul class="drawer-incident-list">
-        <li class="muted">Incident history is loading.</li>
-      </ul>
-    </section>
-  </aside>
 
   <dialog id="monitor-dialog">
     <form id="monitor-form" class="form">
