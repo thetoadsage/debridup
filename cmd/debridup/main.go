@@ -1717,24 +1717,39 @@ func confirmedAvailability(observedStart, now int64, periods []incidentPeriod) *
 	return &value
 }
 
+// listIncidents returns the newest 200 incidents, newest first, with each
+// incident's timeline in chronological order. The bounded response makes the
+// endpoint suitable for the interactive incident view without growing with the
+// full retention period. Event check metadata is included only while its raw
+// check result is retained; detailed provider error text is intentionally not
+// exposed here.
 func (a *app) listIncidents(w http.ResponseWriter, r *http.Request) {
+	type incidentEventCheck struct {
+		ID         int64   `json:"id"`
+		Source     string  `json:"source"`
+		DurationMS int64   `json:"durationMs"`
+		HTTPStatus *int64  `json:"httpStatus,omitempty"`
+		ErrorCode  *string `json:"errorCode,omitempty"`
+	}
 	type incidentEvent struct {
-		Type      string `json:"type"`
-		State     string `json:"state"`
-		Summary   string `json:"summary"`
-		CreatedAt int64  `json:"createdAt"`
+		Type      string              `json:"type"`
+		State     string              `json:"state"`
+		Summary   string              `json:"summary"`
+		CreatedAt int64               `json:"createdAt"`
+		Check     *incidentEventCheck `json:"check,omitempty"`
 	}
 	type incident struct {
 		ID                        int64 `json:"id"`
 		Name, Provider            string
 		OpenedAt, DetectedAt      int64
 		ResolvedAt                *int64 `json:"resolvedAt"`
+		Ongoing                   bool   `json:"ongoing"`
 		InitialState, LatestState string
 		Summary                   string          `json:"summary"`
 		Events                    []incidentEvent `json:"events"`
 	}
 
-	rows, err := a.db.QueryContext(r.Context(), `SELECT i.id,m.name,m.provider,i.opened_at,i.detected_at,i.resolved_at,i.initial_state,i.latest_state,i.summary FROM incidents i JOIN monitors m ON m.id=i.monitor_id ORDER BY i.opened_at DESC LIMIT 200`)
+	rows, err := a.db.QueryContext(r.Context(), `SELECT i.id,m.name,m.provider,i.opened_at,i.detected_at,i.resolved_at,i.initial_state,i.latest_state,i.summary FROM incidents i JOIN monitors m ON m.id=i.monitor_id ORDER BY i.opened_at DESC,i.id DESC LIMIT 200`)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "could not load incidents"})
 		return
@@ -1756,6 +1771,8 @@ func (a *app) listIncidents(w http.ResponseWriter, r *http.Request) {
 			if x.LatestState == stateHealthy {
 				x.LatestState = x.InitialState
 			}
+		} else {
+			x.Ongoing = true
 		}
 		if summary.Valid {
 			x.Summary = summary.String
@@ -1784,7 +1801,7 @@ func (a *app) listIncidents(w http.ResponseWriter, r *http.Request) {
 	for i := range out {
 		ids = append(ids, out[i].ID)
 	}
-	query := `SELECT e.incident_id,e.type,e.new_state,e.created_at,c.http_status,c.error_code
+	query := `SELECT e.incident_id,e.type,e.new_state,e.created_at,c.id,c.source,c.duration_ms,c.http_status,c.error_code
 	FROM incident_events e LEFT JOIN check_results c ON c.id=e.check_id
 	WHERE e.incident_id IN (?` + strings.Repeat(",?", len(ids)-1) + `)
 	ORDER BY e.incident_id,e.created_at ASC,e.id ASC`
@@ -1797,9 +1814,12 @@ func (a *app) listIncidents(w http.ResponseWriter, r *http.Request) {
 	for eventRows.Next() {
 		var incidentID int64
 		var event incidentEvent
+		var checkID sql.NullInt64
+		var source sql.NullString
+		var durationMS sql.NullInt64
 		var httpStatus sql.NullInt64
 		var errorCode sql.NullString
-		if err = eventRows.Scan(&incidentID, &event.Type, &event.State, &event.CreatedAt, &httpStatus, &errorCode); err != nil {
+		if err = eventRows.Scan(&incidentID, &event.Type, &event.State, &event.CreatedAt, &checkID, &source, &durationMS, &httpStatus, &errorCode); err != nil {
 			writeJSON(w, 500, map[string]string{"error": "could not load incident log"})
 			return
 		}
@@ -1818,6 +1838,18 @@ func (a *app) listIncidents(w http.ResponseWriter, r *http.Request) {
 				result.ErrorCode = errorCode.String
 			}
 			event.Summary = incidentSummary(result)
+		}
+		if checkID.Valid {
+			check := incidentEventCheck{ID: checkID.Int64, Source: source.String, DurationMS: durationMS.Int64}
+			if httpStatus.Valid {
+				value := httpStatus.Int64
+				check.HTTPStatus = &value
+			}
+			if errorCode.Valid {
+				value := errorCode.String
+				check.ErrorCode = &value
+			}
+			event.Check = &check
 		}
 		out[position].Events = append(out[position].Events, event)
 	}

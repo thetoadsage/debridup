@@ -10,20 +10,21 @@
   <link rel="stylesheet" href="/provider-management.css">
 </head>
 <body>
-  <a class="skip-link" href="#dashboard-main">Skip to dashboard</a>
+  <a class="skip-link" href="#dashboard-view">Skip to dashboard</a>
 
   <div class="app-shell">
     <aside class="sidebar">
-      <a class="brand" href="/" aria-label="DebridUp dashboard">
+      <a class="brand" href="#dashboard" aria-label="DebridUp dashboard">
         <span class="mark" aria-hidden="true">D</span>
         <span>DebridUp</span>
       </a>
 
       <nav aria-label="Primary">
-        <a class="nav-link active" href="#dashboard-main" aria-current="page">Dashboard</a>
-        <a class="nav-link" href="#providers-panel">Providers</a>
-        <a class="nav-link" href="#response-history">Response history</a>
-        <a class="nav-link" href="#notification-settings">Settings</a>
+        <a class="nav-link" href="#dashboard" data-view-link="dashboard">Dashboard</a>
+        <a class="nav-link" href="#incidents" data-view-link="incidents">Incidents</a>
+        <a class="nav-link" href="#providers" data-view-link="providers">Providers</a>
+        <a class="nav-link" href="#history" data-view-link="history">Response history</a>
+        <a class="nav-link" href="#settings" data-view-link="settings">Settings</a>
       </nav>
 
       <div class="sidebar-footer">
@@ -40,10 +41,12 @@
       </div>
     </aside>
 
-    <main id="dashboard-main" class="dashboard-main">
+    <main id="app-main" class="dashboard-main" tabindex="-1">
+      <section id="dashboard-view" class="app-view" data-view="dashboard" aria-labelledby="dashboard-heading">
       <header class="dashboard-header">
         <div>
-          <h1>Operations overview</h1>
+          <p class="eyebrow">LIVE MONITORING</p>
+          <h1 id="dashboard-heading">Operations overview</h1>
           <p id="dashboard-status" class="dashboard-status" role="status" aria-live="polite">
             <span id="updated">Loading dashboard data…</span>
           </p>
@@ -74,13 +77,18 @@
           <span class="sr-only">Loading active incidents</span>
         </article>
       </section>
+      </section>
 
-      <section id="providers-panel" class="panel dashboard-panel provider-table-panel" aria-labelledby="providers-heading">
+      <section id="incidents-view" class="app-view" data-view="incidents" hidden aria-labelledby="incidents-heading">
+        <header class="view-header"><div><p class="eyebrow">SERVICE EVENTS</p><h1 id="incidents-heading">Incidents</h1><p class="muted">Ongoing and resolved service interruptions.</p><p id="incident-message" class="view-status muted" role="status" aria-live="polite">Loading incidents…</p></div></header>
+        <div class="panel incident-panel"><div class="table-scroll"><table class="provider-table incident-table"><caption class="sr-only">Incident history</caption><thead><tr><th scope="col">State</th><th scope="col">Provider</th><th scope="col">Summary</th><th scope="col">Opened</th><th scope="col">Recovered</th><th scope="col">Details</th></tr></thead><tbody id="incident-list" aria-busy="true"><tr><td colspan="6" class="muted">Loading incidents…</td></tr></tbody></table></div></div>
+      </section>
+
+      <section id="providers-view" class="app-view" data-view="providers" hidden aria-labelledby="providers-heading">
+      <header class="view-header"><div><p class="eyebrow">CURRENT HEALTH</p><h1 id="providers-heading">Providers</h1><p class="muted">Current service health. Slow means a successful check used at least 80% of its configured timeout.</p></div></header>
+      <section id="providers-panel" class="panel provider-table-panel">
         <div class="section-title">
-          <div>
-            <h2 id="providers-heading">Providers</h2>
-            <p class="muted">Current service health. Slow means a successful check used at least 80% of its configured timeout.</p>
-          </div>
+          <div><h2>Provider health</h2></div>
         </div>
         <div class="table-scroll" tabindex="0" aria-label="Scrollable provider status table">
           <table class="provider-table">
@@ -114,13 +122,7 @@
         </div>
       </section>
 
-      <section id="response-history" class="panel dashboard-panel" aria-labelledby="checks-heading">
-        <div class="section-title"><div><h2 id="checks-heading">Response history</h2><p class="muted">Authenticated and public checks retained by this installation.</p></div></div>
-        <div class="table-scroll"><table class="provider-table"><caption class="sr-only">Chronological retained service responses</caption><thead><tr><th scope="col">Service</th><th scope="col">Source</th><th scope="col">Result</th><th scope="col">Latency</th><th scope="col">HTTP / error</th><th scope="col">Time</th><th scope="col">Incident</th></tr></thead><tbody id="check-log-body" aria-busy="true"></tbody></table></div>
-        <button id="load-more-checks" class="quiet" type="button" hidden>Load more</button>
-      </section>
-
-      <section id="provider-management" class="panel dashboard-panel management-panel" aria-labelledby="management-heading">
+      <section id="provider-management" class="panel management-panel" aria-labelledby="management-heading">
         <div class="section-title">
           <div>
             <h2 id="management-heading">Provider settings</h2>
@@ -133,8 +135,16 @@
         </div>
         <div id="cards" class="cards management-grid"></div>
       </section>
+      </section>
 
-      <section id="notification-settings" class="panel dashboard-panel notification-panel" aria-labelledby="notifications-heading">
+      <section id="history-view" class="app-view" data-view="history" hidden aria-labelledby="checks-heading">
+        <header class="view-header"><div><p class="eyebrow">RETAINED RESPONSES</p><h1 id="checks-heading">Response history</h1><p class="muted">A live, chronological diagnostic log. Scroll inside the window to inspect retained checks.</p></div></header>
+        <section id="response-history" class="panel log-panel"><div class="log-window" tabindex="0" aria-label="Scrollable response history log"><table class="provider-table log-table"><caption class="sr-only">Chronological retained service responses</caption><thead><tr><th scope="col">Service</th><th scope="col">Source</th><th scope="col">Result</th><th scope="col">Latency</th><th scope="col">HTTP / error</th><th scope="col">Time</th><th scope="col">Incident</th></tr></thead><tbody id="check-log-body" aria-busy="true"><tr><td colspan="7" class="muted">Loading response history…</td></tr></tbody></table></div><div class="log-actions"><span id="history-message" class="muted" role="status" aria-live="polite"></span><button id="load-more-checks" class="quiet" type="button" hidden>Load more</button></div></section>
+      </section>
+
+      <section id="settings-view" class="app-view" data-view="settings" hidden aria-labelledby="settings-heading">
+      <header class="view-header"><div><p class="eyebrow">PREFERENCES</p><h1 id="settings-heading">Settings</h1><p class="muted">Notification and display preferences.</p></div></header>
+      <section id="notification-settings" class="panel notification-panel" aria-labelledby="notifications-heading">
         <div class="section-title">
           <div>
             <h2 id="notifications-heading">Notifications</h2>
@@ -185,6 +195,7 @@
           </div>
           <p id="ntfy-message" class="channel-message" role="status" aria-live="polite"></p>
         </form>
+      </section>
       </section>
     </main>
   </div>

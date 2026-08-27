@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {createDashboardModel, escapeHTML, formatLatency, formatState} from './dashboard-model.mjs';
 import {applyTheme, normalizeTheme, THEMES} from './theme.mjs';
 import {AUTO_TIME_ZONE, timeZoneDescription} from './timezone.mjs';
+import {normalizeIncident} from './dashboard.mjs';
 
 test('formats simple current-health fields safely', () => {
   assert.equal(formatLatency(81), '81 ms');
@@ -36,4 +37,27 @@ test('keeps theme and time-zone preferences safe', () => {
   const document = {documentElement: {dataset: {}}};
   applyTheme(document, 'sakura');
   assert.equal(document.documentElement.dataset.theme, 'sakura');
+});
+
+test('normalizes the incident API’s capitalized fields without changing event fields', () => {
+  const incident = normalizeIncident({
+    Name: '<Real-Debrid>',
+    Provider: 'realdebrid',
+    OpenedAt: 100,
+    ResolvedAt: null,
+    LatestState: 'auth_failed',
+    Ongoing: true,
+    summary: 'Authentication failed',
+    events: [{type: 'opened', createdAt: 100, state: 'auth_failed'}],
+  });
+  assert.deepEqual(incident, {
+    name: '<Real-Debrid>',
+    provider: 'realdebrid',
+    latestState: 'auth_failed',
+    summary: 'Authentication failed',
+    openedAt: 100,
+    resolvedAt: null,
+    ongoing: true,
+    events: [{type: 'opened', createdAt: 100, state: 'auth_failed'}],
+  });
 });

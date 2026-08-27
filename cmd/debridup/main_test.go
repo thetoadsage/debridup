@@ -937,12 +937,14 @@ func TestListIncidentsGroupsEventsOntoTheirIncident(t *testing.T) {
 	exec(`INSERT INTO incidents(id,monitor_id,opened_at,detected_at,resolved_at,initial_state,latest_state,summary) VALUES
 		(1,1,100,105,180,'api_issue','healthy','First outage'),
 		(2,1,200,205,NULL,'auth_failed','auth_failed',NULL),
-		(3,2,300,305,NULL,'connection_issue','connection_issue','Beta down')`)
+		(3,2,300,305,NULL,'connection_issue','connection_issue','Beta down'),
+		(4,2,300,306,NULL,'api_issue','api_issue','Same-time outage')`)
 	exec(`INSERT INTO incident_events(id,incident_id,type,new_state,created_at,check_id) VALUES
 		(1,1,'opened','api_issue',105,10),
 		(2,1,'recovered','healthy',180,NULL),
 		(3,2,'opened','auth_failed',205,NULL),
-		(4,3,'opened','connection_issue',305,NULL)`)
+		(4,3,'opened','connection_issue',305,NULL),
+		(5,4,'opened','api_issue',306,NULL)`)
 
 	response := httptest.NewRecorder()
 	a.listIncidents(response, httptest.NewRequest(http.MethodGet, "/api/incidents", nil))
@@ -956,22 +958,30 @@ func TestListIncidentsGroupsEventsOntoTheirIncident(t *testing.T) {
 		LatestState string `json:"LatestState"`
 		Summary     string `json:"summary"`
 		ResolvedAt  *int64 `json:"resolvedAt"`
+		Ongoing     bool   `json:"ongoing"`
 		Events      []struct {
 			Type      string `json:"type"`
 			State     string `json:"state"`
 			Summary   string `json:"summary"`
 			CreatedAt int64  `json:"createdAt"`
+			Check     *struct {
+				ID         int64   `json:"id"`
+				Source     string  `json:"source"`
+				DurationMS int64   `json:"durationMs"`
+				HTTPStatus *int64  `json:"httpStatus"`
+				ErrorCode  *string `json:"errorCode"`
+			} `json:"check"`
 		} `json:"events"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &incidents); err != nil {
 		t.Fatalf("decode: %v (body %s)", err, response.Body.String())
 	}
-	if len(incidents) != 3 {
-		t.Fatalf("got %d incidents, want 3", len(incidents))
+	if len(incidents) != 4 {
+		t.Fatalf("got %d incidents, want 4", len(incidents))
 	}
-	// Ordered by opened_at DESC.
-	if incidents[0].ID != 3 || incidents[1].ID != 2 || incidents[2].ID != 1 {
-		t.Fatalf("unexpected incident order: %d,%d,%d", incidents[0].ID, incidents[1].ID, incidents[2].ID)
+	// Ordered by opened_at DESC, then ID DESC for same-time incidents.
+	if incidents[0].ID != 4 || incidents[1].ID != 3 || incidents[2].ID != 2 || incidents[3].ID != 1 {
+		t.Fatalf("unexpected incident order: %d,%d,%d,%d", incidents[0].ID, incidents[1].ID, incidents[2].ID, incidents[3].ID)
 	}
 
 	byID := map[int64]int{}
@@ -989,12 +999,21 @@ func TestListIncidentsGroupsEventsOntoTheirIncident(t *testing.T) {
 	if !strings.Contains(first.Events[0].Summary, "503") {
 		t.Fatalf("incident 1 opened summary lost its check detail: %q", first.Events[0].Summary)
 	}
+	if first.Events[0].Check == nil || first.Events[0].Check.ID != 10 || first.Events[0].Check.Source != "authenticated" || first.Events[0].Check.DurationMS != 5 || first.Events[0].Check.HTTPStatus == nil || *first.Events[0].Check.HTTPStatus != 503 || first.Events[0].Check.ErrorCode == nil || *first.Events[0].Check.ErrorCode != "server_error" {
+		t.Fatalf("incident 1 opened event check = %+v", first.Events[0].Check)
+	}
 	if first.Events[1].Summary != "Authenticated checks recovered and the incident was resolved." {
 		t.Fatalf("unexpected recovery summary: %q", first.Events[1].Summary)
+	}
+	if first.Events[1].Check != nil {
+		t.Fatalf("pruned or absent raw checks must be omitted, got %+v", first.Events[1].Check)
 	}
 	// A resolved incident reports its initial state, not 'healthy'.
 	if first.LatestState != "api_issue" {
 		t.Fatalf("resolved incident LatestState = %q, want api_issue", first.LatestState)
+	}
+	if first.Ongoing {
+		t.Fatal("resolved incident must not be ongoing")
 	}
 
 	second := incidents[byID[2]]
@@ -1008,10 +1027,77 @@ func TestListIncidentsGroupsEventsOntoTheirIncident(t *testing.T) {
 	if second.ResolvedAt != nil {
 		t.Fatalf("incident 2 must be unresolved")
 	}
+	if !second.Ongoing {
+		t.Fatal("unresolved incident must be ongoing")
+	}
+	if second.Events[0].Check != nil {
+		t.Fatalf("event without a retained check must omit check metadata, got %+v", second.Events[0].Check)
+	}
 
 	third := incidents[byID[3]]
 	if third.Name != "Real-Debrid" || len(third.Events) != 1 {
 		t.Fatalf("incident 3 = %+v", third)
+	}
+}
+
+func TestListIncidentsIsBoundedToNewestTwoHundred(t *testing.T) {
+	a := testApp(t)
+	if err := migrateDatabase(context.Background(), a.db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`INSERT INTO monitors(id,provider,name,created_at,updated_at) VALUES(1,'torbox','TorBox',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id := 1; id <= 201; id++ {
+		if _, err := tx.Exec(`INSERT INTO incidents(id,monitor_id,opened_at,detected_at,initial_state,latest_state,summary) VALUES(?,?,?,?,?,?,?)`, id, 1, id, id, stateAPI, stateAPI, "test"); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	a.listIncidents(response, httptest.NewRequest(http.MethodGet, "/api/incidents", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var incidents []struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &incidents); err != nil {
+		t.Fatal(err)
+	}
+	if len(incidents) != 200 || incidents[0].ID != 201 || incidents[len(incidents)-1].ID != 2 {
+		t.Fatalf("bounded incidents = %#v", incidents)
+	}
+}
+
+func TestIncidentsRouteRequiresAuthenticationAndIsUncached(t *testing.T) {
+	a := sessionTestApp(t)
+	routes := a.routes()
+
+	unauthenticated := httptest.NewRecorder()
+	routes.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, "/api/incidents", nil))
+	if unauthenticated.Code != http.StatusUnauthorized || strings.TrimSpace(unauthenticated.Body.String()) != `{"error":"authentication required"}` {
+		t.Fatalf("unauthenticated response = %d %s", unauthenticated.Code, unauthenticated.Body.String())
+	}
+	if cacheControl := unauthenticated.Header().Get("Cache-Control"); cacheControl != "no-store" {
+		t.Fatalf("unauthenticated Cache-Control = %q, want no-store", cacheControl)
+	}
+
+	authenticated := httptest.NewRecorder()
+	routes.ServeHTTP(authenticated, authenticatedRequest(t, a, http.MethodGet, "/api/incidents"))
+	if authenticated.Code != http.StatusOK || strings.TrimSpace(authenticated.Body.String()) != "[]" {
+		t.Fatalf("authenticated response = %d %s", authenticated.Code, authenticated.Body.String())
+	}
+	if cacheControl := authenticated.Header().Get("Cache-Control"); cacheControl != "no-store" {
+		t.Fatalf("authenticated Cache-Control = %q, want no-store", cacheControl)
 	}
 }
 

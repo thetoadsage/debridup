@@ -35,9 +35,9 @@ Compose keeps `/data` writable while mounting only the encryption-key file read-
 
 ## Dashboard
 
-The dashboard is intentionally current-state first: each configured service shows its status, latest authenticated latency, last check, and whether it has an active incident. A successful check is shown as **Slow** when it consumes at least 80% of that monitor's configured timeout. Slow is informational and never changes incident or notification thresholds.
+The interface is split into focused Dashboard, Incidents, Providers, Response History, and Settings views instead of one long page. The dashboard is intentionally current-state first, while the provider view shows each configured service's status, latest authenticated latency, last check, and active-incident state. A successful check is shown as **Slow** when it consumes at least 80% of that monitor's configured timeout. Slow is informational and never changes incident or notification thresholds.
 
-The dashboard refreshes every 30 seconds while its tab is visible and refreshes when it becomes visible again. The response-history list contains both authenticated and public checks, uses **Load more** pagination, and shows associated incidents when available. Use **Report** to download a self-contained HTML report for 1, 7, 30, or 90 days, or all retained raw checks. “All” means the installed raw-check retention window (90 days by default), not all-time history; incident records may be retained longer.
+The dashboard refreshes every 30 seconds while its tab is visible and refreshes when it becomes visible again. Response History is a bounded, independently scrollable log containing authenticated and public checks; it uses **Load more** pagination and shows associated incidents when available without growing the entire page. Use **Report** to download a self-contained HTML report for 1, 7, 30, or 90 days, or all retained raw checks. “All” means the installed raw-check retention window (90 days by default), not all-time history; incident records may be retained longer.
 
 ## Runtime data and checks
 
