@@ -4,7 +4,7 @@ DebridUp is published as a public multi-architecture image, so it runs on both x
 
 ## Quick install
 
-1. In the Unraid terminal, create separate persistent data and secret-only directories. The default template assumes your pool is called `cache`; replace `/mnt/cache` if yours has a different name.
+1. In the Unraid terminal, create separate persistent data and secret-only directories. The default template assumes the appdata share uses a pool named `cache`. If Unraid uses another pool, replace `/mnt/cache` with `/mnt/<pool-name>` in these commands and in both template host paths.
 
    ```sh
    install -d -m 0700 -o 99 -g 100 /mnt/cache/appdata/debridup
@@ -25,7 +25,7 @@ DebridUp is published as a public multi-architecture image, so it runs on both x
 
 4. Open `http://YOUR-UNRAID-IP:8080` and sign in.
 
-The template runs DebridUp as `PUID=99` and `PGID=100`—Unraid's usual `nobody:users` ownership—uses `/mnt/cache/appdata/debridup` for SQLite, mounts the root-owned encryption key read-only from the separate `/mnt/cache/appdata/debridup-secrets` directory, keeps the container root filesystem read-only, and enables `no-new-privileges`. It drops every Linux capability before adding only `SETUID` and `SETGID` for the entrypoint's one-way user/group transition; the non-root application process retains no effective capabilities.
+The template runs DebridUp as `PUID=99` and `PGID=100`—Unraid's usual `nobody:users` ownership—uses a direct pool path for SQLite, mounts the root-owned encryption key read-only from a separate directory, keeps the container root filesystem read-only, and provides a temporary `/tmp` directory for report generation. It drops every Linux capability before adding only `SETUID` and `SETGID` for the entrypoint's one-way user/group transition; the non-root application process retains no effective capabilities.
 
 ## Updates
 

@@ -17,7 +17,6 @@ Before applying this template, create the encryption-key file using the command 
   <Category>Tools:Utilities Status:Monitoring</Category>
   <ExtraSearchTerms>debrid uptime monitoring torbox premiumize real debrid alldebrid status</ExtraSearchTerms>
   <Requires>An encryption-key file created before the first start. AMD64 or ARM64 Unraid host.</Requires>
-  <License>AGPL-3.0</License>
   <WebUI>http://[IP]:[PORT:8080]</WebUI>
   <ExtraParams>--read-only --tmpfs /tmp --cap-drop=ALL --cap-add=SETUID --cap-add=SETGID --security-opt=no-new-privileges</ExtraParams>
   <Config Name="Appdata" Target="/data" Default="/mnt/cache/appdata/debridup" Mode="rw" Description="SQLite database and application data. Keep this on a pool device rather than /mnt/user for reliable SQLite performance. If your pool is not named cache, change this path." Type="Path" Display="always" Required="true" Mask="false">/mnt/cache/appdata/debridup</Config>

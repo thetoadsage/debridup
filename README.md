@@ -1,90 +1,105 @@
 # DebridUp
 
-Private, self-hosted uptime monitoring for debrid providers. DebridUp monitors TorBox, Premiumize, AllDebrid, Real-Debrid, Torrin, PikPak, Offcloud, Debrid-Link, EasyDebrid, Debrider, and Deepbrid with encrypted credentials, SQLite history, incidents, a dashboard, and ntfy notifications.
+DebridUp is a private, self-hosted status dashboard for debrid services. It checks your configured providers, tracks availability and response times, records incidents, and can notify you through ntfy.
 
-All authenticated checks are read-only account or history requests. Most providers accept their normal API key or token. PikPak currently requires an access token accepted by its user API; because that token can expire, replace it from the provider settings when authentication begins failing.
+Supported providers: TorBox, Premiumize, AllDebrid, Real-Debrid, Torrin, PikPak, Offcloud, Debrid-Link, EasyDebrid, Debrider, and Deepbrid.
 
-## Run with Docker
+## What it does
 
-1. Copy `.env.example` to `.env` and set a unique admin password.
-2. Create a 32-byte encryption key:
+- Shows whether each provider is up, degraded, slow, or unavailable.
+- Tracks incidents, recoveries, availability, and p50/p95 response times.
+- Displays a graph-based service history for 24 hours, 7 days, or 30 days.
+- Exports readable HTML reports for 1, 7, 30, or 90 days, or all retained history.
+- Sends incident and recovery notifications through ntfy.
+- Encrypts provider credentials and notification URLs before storing them in SQLite.
+- Runs on AMD64 and ARM64 with Docker Compose or the included Unraid template.
+
+Authenticated checks use read-only account or history endpoints. PikPak requires a compatible access token, which may need to be replaced when it expires.
+
+## Docker quick start
+
+1. Copy the example environment file and set an admin password of at least 12 characters:
+
+   ```sh
+   cp .env.example .env
+   ```
+
+2. Create the encryption key:
 
    ```sh
    install -d -m 0700 secrets
    openssl rand -base64 32 | sudo install -m 0400 -o root -g root /dev/stdin secrets/encryption_key
    ```
 
-   The `secrets` directory stays owned by the invoking user so Git and Docker can traverse the tracked placeholder, while only `encryption_key` becomes root-owned and read-only. Compose bind-mounts the key without changing its host ownership or mode, which lets the capability-restricted startup process open it before dropping to the application user. Do not make the key group- or world-readable. If a previous setup made the directory root-owned, restore directory ownership with `sudo chown "$(id -u):$(id -g)" secrets` before running these commands. If the key already exists, use `sudo chown root:root secrets/encryption_key && sudo chmod 0400 secrets/encryption_key` instead of generating a replacement.
-
-3. Start it:
+3. Start DebridUp:
 
    ```sh
    docker compose pull
    docker compose up -d
    ```
 
-Open `http://localhost:8080`. Use a TLS reverse proxy before exposing the dashboard beyond a trusted private network.
+Open `http://localhost:8080`, sign in, and add providers under **Settings → Provider settings**.
 
-The published image is `ghcr.io/thetoadsage/debridup:latest` for both AMD64 and ARM64 servers. Set `DEBRIDUP_IMAGE_TAG` to a published version tag when you want to pin a deployment. To update an existing installation, run `docker compose pull && docker compose up -d`.
+Use a TLS reverse proxy before making DebridUp available outside a trusted private network. The published image is `ghcr.io/thetoadsage/debridup:latest`.
 
-If an older installation keeps its encryption key inside writable application data, stop DebridUp and back up the database and key together before upgrading. Copy the existing key without changing its contents to `secrets/encryption_key`, make the file `root:root` mode `0400` as shown above, and then start the updated Compose service. Confirm that login and an authenticated provider check succeed before removing the old key copy. Never generate a replacement key for an existing database: the stored provider credentials and notification URL require the original key.
+> [!IMPORTANT]
+> Back up `/data` and `secrets/encryption_key` together. Never replace the encryption key for an existing database—stored provider credentials and notification settings cannot be recovered without the matching key.
 
-To build directly from source instead, run `docker build -t debridup:local .`.
+## Using DebridUp
 
-Compose keeps `/data` writable while mounting only the encryption-key file read-only at `/run/secrets/encryption_key`. The container root filesystem is read-only, `/tmp` is a temporary filesystem, all capabilities are dropped except the two needed for the entrypoint's one-way user/group transition, and `no-new-privileges` is enabled. The entrypoint opens the root-readable key on inherited file descriptor 3, removes the key path and direct-key variables from the application environment, drops privileges, and then starts DebridUp.
+- **Dashboard** gives an at-a-glance health summary.
+- **Incidents** lists current and recovered incidents.
+- **Providers** shows the latest status and response time for every configured service.
+- **Service history** shows availability, status changes, and latency trends.
+- **Settings** manages providers, ntfy notifications, display time zone, and theme.
+- **Report** downloads a self-contained HTML report for the selected period.
 
-## Dashboard
-
-The interface is split into focused Dashboard, Incidents, Providers, Service History, and Settings views instead of one long page. The dashboard is intentionally current-state first, while the provider view shows each configured service's status, latest authenticated latency, last check, and active-incident state. Provider configuration lives in Settings beside notification and display preferences. A successful check is shown as **Slow** when it consumes at least 80% of that monitor's configured timeout. Slow is informational and never changes incident or notification thresholds.
-
-The dashboard refreshes every 30 seconds while its tab is visible and refreshes when it becomes visible again. Service History is a graph-first view backed by bounded authenticated rollups: choose 24 hours, 7 days, or 30 days, then select a provider to review availability, p50, and p95 latency without loading raw checks. Use **Report** on the Dashboard to download a self-contained report for 1, 7, 30, or 90 days, or all retained raw checks. “All” means the installed raw-check retention window (90 days by default), not all-time history; incident records may be retained longer.
-
-## Runtime data and checks
-
-Database migrations are versioned and applied transactionally at startup. Raw authenticated and public check rows are retained for 90 days by default; pruning runs at startup and after each UTC date change. Incidents and incident events remain after their raw check rows expire. Back up the SQLite database and its matching encryption key together before upgrades.
-
-Only one check can run for a provider monitor at a time. A scheduled check that overlaps its previous run is skipped until the next interval, and a global worker limit bounds checks across all monitors. `DEBRIDUP_MAX_CONCURRENT_CHECKS` defaults to `4` and accepts values from `1` through `32`.
-
-`GET /healthz` is a liveness check: it reports whether the HTTP process is running. `GET /readyz` also performs a bounded database query and reports whether the application is ready to serve database-backed requests. Container health checks use `/readyz`.
-
-On `SIGTERM` or `SIGINT` the server stops accepting connections, lets in-flight requests finish, and shuts the scheduler and notification workers down before exiting. Startup problems are reported as a logged message and a non-zero exit rather than a stack trace.
-
-API responses are never cached. The embedded stylesheets and modules are served with an `ETag` derived from the asset bundle and revalidate against it, so a browser refetches them only after an upgrade. Text responses are gzip-encoded for clients that accept it.
+The dashboard refreshes every 30 seconds while visible. Raw checks are retained for 90 days by default; incidents remain after their raw samples expire.
 
 ## Unraid
 
-An importable Unraid Docker template is included at [`unraid/debridup.xml`](unraid/debridup.xml). It defaults to the public GHCR image, stores SQLite data in appdata, runs as Unraid's `nobody:users` (`PUID=99`, `PGID=100`), and uses a read-only root filesystem.
+An importable template is included at [`unraid/debridup.xml`](unraid/debridup.xml).
 
-Use the [Unraid guide](unraid/README.md) for the short key-generation and template-import steps. Keep a separate protected backup of the encryption key: restoring a database requires its matching key.
+Follow the [Unraid installation guide](unraid/README.md) to create the encryption key and import the template. The default paths use `/mnt/cache/appdata`; if your appdata share uses another pool, change both template host paths to `/mnt/<pool-name>/appdata/...` before applying it.
 
-## Security model
+The template uses the public multi-architecture image, stores the database in appdata, runs the application as Unraid's usual `nobody:users` account, and keeps the encryption key in a separate read-only mount.
 
-- API keys and notification endpoints are encrypted with XChaCha20-Poly1305 before reaching SQLite.
-- The encryption key is loaded from a file/secret and is never persisted in the database.
-- The container entrypoint opens the root-owned, read-only Docker secret, then drops privileges before starting the application.
-- Secrets are write-only in the API and are never sent to the browser.
-- The app is single-admin; its initial password is supplied through `DEBRIDUP_ADMIN_PASSWORD` and stored as an Argon2id hash.
-- Sessions are server-side records. Signing out revokes the session rather than only clearing the cookie, and sessions survive a restart until they expire after 24 hours.
-- `POST /login` bounds how many Argon2id verifications run at once and locks a client out after repeated failures, so unauthenticated requests cannot exhaust memory. Client identity comes from the connection's remote address, so run DebridUp behind a trusted reverse proxy.
-- Responses carry a strict `Content-Security-Policy`; every script, style, and asset is same-origin and embedded.
-- SQLite runs in WAL mode with `synchronous=NORMAL`. Back up using SQLite's online backup mechanism, not by copying only the database file while the app is live.
+## Updating and backups
 
-## Verification and release safety
+Update Docker Compose installations with:
 
-Pull requests and pushes to `main` run formatting, Go tests, race tests, static analysis, the browser-module suite, vulnerability analysis, a container build, and release-safety scanning. Container publication depends on that reusable verification workflow.
+```sh
+docker compose pull
+docker compose up -d
+```
 
-The module keeps Go 1.24 language compatibility, while the security gate uses exact Go 1.25.14 because the final Go 1.24 release cannot satisfy the unsuppressed standard-library vulnerability gate. The vulnerability scanner is pinned to `govulncheck` v1.7.0. Release-safety scanning covers tracked and staged content, filenames and binary/image metadata, commit messages and identities, and proposed change text supplied through `CHANGE_TEXT`. Optional private patterns belong in the workflow secret named `PRIVATE_PATTERNS`, one pattern per line; do not commit them.
+On Unraid, use **Docker → Check for Updates**. Before updating, keep a consistent backup of the SQLite data and its matching encryption key.
 
-## Environment
+For a live database, use SQLite's online backup mechanism instead of copying only `debridup.db`; SQLite runs in WAL mode.
 
-| Variable | Purpose |
-| --- | --- |
-| `DEBRIDUP_ADMIN_PASSWORD` | Required on first startup; initializes the single admin account. |
-| `DEBRIDUP_ENCRYPTION_KEY_FILE` | Path to a base64-encoded 32-byte master key. |
-| `DEBRIDUP_ENCRYPTION_KEY_FD` | Inherited descriptor containing the key. Container startup sets this internally; operators should normally use the read-only key-file mount. |
-| `DEBRIDUP_ENCRYPTION_KEY` | Alternative master-key source for non-Docker development. |
-| `DEBRIDUP_DATA_DIR` | Defaults to `./data`. |
-| `DEBRIDUP_ADDR` | Defaults to `:8080`. |
-| `DEBRIDUP_HISTORY_RETENTION` | Raw `check_results` retention as a Go duration; defaults to `2160h` (90 days), with a minimum of `24h`. Expired raw checks are pruned at startup and after each UTC date change; incidents and incident events are retained. |
-| `DEBRIDUP_MAX_CONCURRENT_CHECKS` | Maximum checks running across all monitors; defaults to `4` and accepts `1` through `32`. |
-| `PUID` / `PGID` | Optional runtime user and group IDs for bind-mounted data; Unraid template defaults to `99` / `100`. |
+## Configuration
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `DEBRIDUP_ADMIN_PASSWORD` | Initializes the single administrator account on first startup. | Required |
+| `DEBRIDUP_ENCRYPTION_KEY_FILE` | Path to a base64-encoded 32-byte encryption key. | Required in Docker |
+| `DEBRIDUP_DATA_DIR` | SQLite database and application-data directory. | `./data` (`/data` in Docker) |
+| `DEBRIDUP_ADDR` | HTTP listen address. | `:8080` |
+| `DEBRIDUP_HISTORY_RETENTION` | Raw response-history retention as a Go duration. | `2160h` (90 days) |
+| `DEBRIDUP_MAX_CONCURRENT_CHECKS` | Maximum provider checks running at once, from 1 to 32. | `4` |
+| `PUID` / `PGID` | Runtime user and group IDs for bind-mounted data. | Image user; Unraid uses `99` / `100` |
+
+`GET /healthz` checks process health. `GET /readyz` also confirms that the database is ready.
+
+## Security notes
+
+- Provider credentials and ntfy URLs are encrypted with XChaCha20-Poly1305.
+- Secrets are write-only and are never returned to the browser.
+- Sessions are stored server-side and expire after 24 hours.
+- The supplied container runs with a read-only root filesystem, a writable temporary directory, reduced Linux capabilities, and `no-new-privileges`.
+
+To build locally instead of using the published image:
+
+```sh
+docker build -t debridup:local .
+```
