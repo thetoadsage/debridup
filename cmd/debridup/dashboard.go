@@ -1,15 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"log/slog"
 	"math"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -723,54 +726,110 @@ func (a *app) report(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, apiError{Code: "invalid_range", Error: "range must be 1d, 7d, 30d, 90d, or all"})
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="debridup-report.html"`)
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	// Reports are self-contained downloads with no scripts or external assets.
-	// Allow their embedded stylesheet while retaining a restrictive document CSP.
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
-	var firstCheck, lastCheck sql.NullInt64
-	if err := a.db.QueryRowContext(r.Context(), `SELECT MIN(checked_at),MAX(checked_at) FROM check_results WHERE checked_at>=?`, start.Unix()).Scan(&firstCheck, &lastCheck); err != nil {
-		http.Error(w, "Could not generate report", 500)
-		return
-	}
-	rows, err := a.db.QueryContext(r.Context(), `SELECT m.name,c.source,c.state,c.duration_ms,c.http_status,c.error_code,c.error_detail,c.checked_at,(SELECT i.id FROM incidents i WHERE i.monitor_id=c.monitor_id AND i.opened_at<=c.checked_at AND (i.resolved_at IS NULL OR i.resolved_at>=c.checked_at) ORDER BY i.opened_at DESC,i.id DESC LIMIT 1) FROM check_results c JOIN monitors m ON m.id=c.monitor_id WHERE c.checked_at>=? ORDER BY c.checked_at DESC,c.id DESC`, start.Unix())
-	if err != nil {
-		http.Error(w, "Could not generate report", 500)
-		return
-	}
-	defer rows.Close()
 	type serviceSummary struct {
 		name                                            string
 		total, authenticated, healthy, average, maximum int64
 	}
-	summaryRows, err := a.db.QueryContext(r.Context(), `SELECT m.name,COUNT(*),SUM(CASE WHEN c.source='authenticated' THEN 1 ELSE 0 END),SUM(CASE WHEN c.source='authenticated' AND c.state='healthy' THEN 1 ELSE 0 END),COALESCE(AVG(CASE WHEN c.source='authenticated' THEN c.duration_ms END),0),COALESCE(MAX(CASE WHEN c.source='authenticated' THEN c.duration_ms END),0) FROM check_results c JOIN monitors m ON m.id=c.monitor_id WHERE c.checked_at>=? GROUP BY m.id,m.name ORDER BY m.name`, start.Unix())
+	type reportIncident struct {
+		name, state, summary string
+		opened               int64
+		resolved             sql.NullInt64
+	}
+	responseFile, err := os.CreateTemp("", "debridup-report-responses-*")
 	if err != nil {
+		a.log().Error("create report spool", "error", err)
 		http.Error(w, "Could not generate report", 500)
 		return
 	}
-	summaries := make([]serviceSummary, 0)
-	for summaryRows.Next() {
-		var s serviceSummary
-		if err := summaryRows.Scan(&s.name, &s.total, &s.authenticated, &s.healthy, &s.average, &s.maximum); err != nil {
-			summaryRows.Close()
-			http.Error(w, "Could not generate report", 500)
-			return
+	responsePath := responseFile.Name()
+	defer os.Remove(responsePath)
+	defer responseFile.Close()
+	var firstCheck, lastCheck sql.NullInt64
+	var summaries []serviceSummary
+	var incidents []reportIncident
+	loadErr := a.withReadOnlyDashboardTransaction(r.Context(), func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(r.Context(), `SELECT MIN(checked_at),MAX(checked_at) FROM check_results WHERE checked_at>=?`, start.Unix()).Scan(&firstCheck, &lastCheck); err != nil {
+			return fmt.Errorf("load report coverage: %w", err)
 		}
-		summaries = append(summaries, s)
-	}
-	if err := summaryRows.Err(); err != nil {
-		summaryRows.Close()
-		http.Error(w, "Could not generate report", 500)
+		rows, err := tx.QueryContext(r.Context(), `SELECT m.name,COUNT(*),SUM(CASE WHEN c.source='authenticated' THEN 1 ELSE 0 END),SUM(CASE WHEN c.source='authenticated' AND c.state='healthy' THEN 1 ELSE 0 END),COALESCE(AVG(CASE WHEN c.source='authenticated' THEN c.duration_ms END),0),COALESCE(MAX(CASE WHEN c.source='authenticated' THEN c.duration_ms END),0) FROM check_results c JOIN monitors m ON m.id=c.monitor_id WHERE c.checked_at>=? GROUP BY m.id,m.name ORDER BY m.name`, start.Unix())
+		if err != nil {
+			return fmt.Errorf("load report summaries: %w", err)
+		}
+		for rows.Next() {
+			var s serviceSummary
+			if err := rows.Scan(&s.name, &s.total, &s.authenticated, &s.healthy, &s.average, &s.maximum); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan report summary: %w", err)
+			}
+			summaries = append(summaries, s)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("read report summaries: %w", err)
+		}
+		rows.Close()
+		rows, err = tx.QueryContext(r.Context(), `SELECT m.name,i.opened_at,i.resolved_at,i.latest_state,COALESCE(i.summary,'') FROM incidents i JOIN monitors m ON m.id=i.monitor_id WHERE i.opened_at>=? OR (i.resolved_at IS NULL OR i.resolved_at>=?) ORDER BY i.opened_at DESC`, start.Unix(), start.Unix())
+		if err != nil {
+			return fmt.Errorf("load report incidents: %w", err)
+		}
+		for rows.Next() {
+			var x reportIncident
+			if err := rows.Scan(&x.name, &x.opened, &x.resolved, &x.state, &x.summary); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan report incident: %w", err)
+			}
+			incidents = append(incidents, x)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("read report incidents: %w", err)
+		}
+		rows.Close()
+		rows, err = tx.QueryContext(r.Context(), `SELECT m.name,c.source,c.state,c.duration_ms,c.http_status,c.error_code,c.error_detail,c.checked_at,(SELECT i.id FROM incidents i WHERE i.monitor_id=c.monitor_id AND i.opened_at<=c.checked_at AND (i.resolved_at IS NULL OR i.resolved_at>=c.checked_at) ORDER BY i.opened_at DESC,i.id DESC LIMIT 1) FROM check_results c JOIN monitors m ON m.id=c.monitor_id WHERE c.checked_at>=? ORDER BY c.checked_at DESC,c.id DESC`, start.Unix())
+		if err != nil {
+			return fmt.Errorf("load report responses: %w", err)
+		}
+		for rows.Next() {
+			var name, source, state string
+			var duration, checked int64
+			var status, incident sql.NullInt64
+			var code, detail sql.NullString
+			if err := rows.Scan(&name, &source, &state, &duration, &status, &code, &detail, &checked, &incident); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan report response: %w", err)
+			}
+			result := state
+			if code.Valid {
+				result += ": " + code.String
+			}
+			if detail.Valid {
+				result += ": " + detail.String
+			}
+			httpValue := "—"
+			if status.Valid {
+				httpValue = strconv.FormatInt(status.Int64, 10)
+			}
+			incidentValue := "—"
+			if incident.Valid {
+				incidentValue = "#" + strconv.FormatInt(incident.Int64, 10)
+			}
+			if _, err := fmt.Fprintf(responseFile, "<tr><td>%s</td><td>%s</td><td>%s</td><td>%d ms</td><td>%s</td><td>%s</td><td>%s</td></tr>", template.HTMLEscapeString(name), template.HTMLEscapeString(source), template.HTMLEscapeString(result), duration, template.HTMLEscapeString(httpValue), time.Unix(checked, 0).UTC().Format(time.RFC3339), template.HTMLEscapeString(incidentValue)); err != nil {
+				rows.Close()
+				return fmt.Errorf("write report response spool: %w", err)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("read report responses: %w", err)
+		}
+		rows.Close()
+		return nil
+	})
+	if loadErr != nil {
+		a.log().Error("generate report data", "range", label, "error", loadErr)
+		http.Error(w, "Could not generate report", http.StatusInternalServerError)
 		return
 	}
-	summaryRows.Close()
-	incidentRows, err := a.db.QueryContext(r.Context(), `SELECT m.name,i.opened_at,i.resolved_at,i.latest_state,COALESCE(i.summary,'') FROM incidents i JOIN monitors m ON m.id=i.monitor_id WHERE i.opened_at>=? OR (i.resolved_at IS NULL OR i.resolved_at>=?) ORDER BY i.opened_at DESC`, start.Unix(), start.Unix())
-	if err != nil {
-		http.Error(w, "Could not generate report", 500)
-		return
-	}
-	defer incidentRows.Close()
 	coverage := "No retained checks in this range"
 	if firstCheck.Valid {
 		coverage = time.Unix(firstCheck.Int64, 0).UTC().Format(time.RFC3339) + " to " + time.Unix(lastCheck.Int64, 0).UTC().Format(time.RFC3339)
@@ -790,63 +849,65 @@ func (a *app) report(w http.ResponseWriter, r *http.Request) {
 		overallAvailability = float64(healthyChecks) * 100 / float64(authenticatedChecks)
 		overallAverage = weightedLatency / authenticatedChecks
 	}
-	fmt.Fprintf(w, "<!doctype html><meta charset=utf-8><title>DebridUp report</title><style>body{font:15px system-ui;margin:2rem;color:#18212b}table{border-collapse:collapse;width:100%%;margin-bottom:2rem}th,td{padding:.45rem;border-bottom:1px solid #ccd;text-align:left}th{background:#eef}code{white-space:pre-wrap}</style><h1>DebridUp incident report</h1><p>Range: <strong>%s</strong>. Data coverage: %s. Generated: %s. Raw checks are retained for a configured period (90 days by default); incidents may outlive these checks.</p><h2>Overall summary</h2><p>%d retained responses across %d services. Authenticated availability: %.2f%% (%d checks). Average latency: %d ms; maximum latency: %d ms. Public checks remain in the response history but do not affect availability or latency statistics.</p><h2>Service summary</h2><table><thead><tr><th>Service</th><th>Responses</th><th>Authenticated availability</th><th>Average latency</th><th>Maximum latency</th></tr></thead><tbody>", template.HTMLEscapeString(label), template.HTMLEscapeString(coverage), now.Format(time.RFC3339), totalChecks, len(summaries), overallAvailability, authenticatedChecks, overallAverage, maximumLatency)
+	outputFile, err := os.CreateTemp("", "debridup-report-*")
+	if err != nil {
+		a.log().Error("create report output", "error", err)
+		http.Error(w, "Could not generate report", 500)
+		return
+	}
+	outputPath := outputFile.Name()
+	defer os.Remove(outputPath)
+	defer outputFile.Close()
+	bufferedOutput := bufio.NewWriter(outputFile)
+	fmt.Fprintf(bufferedOutput, "<!doctype html><meta charset=utf-8><title>DebridUp report</title><style>body{font:15px system-ui;margin:2rem;color:#18212b}table{border-collapse:collapse;width:100%%;margin-bottom:2rem}th,td{padding:.45rem;border-bottom:1px solid #ccd;text-align:left}th{background:#eef}code{white-space:pre-wrap}</style><h1>DebridUp incident report</h1><p>Range: <strong>%s</strong>. Data coverage: %s. Generated: %s. Raw checks are retained for a configured period (90 days by default); incidents may outlive these checks.</p><h2>Overall summary</h2><p>%d retained responses across %d services. Authenticated availability: %.2f%% (%d checks). Average latency: %d ms; maximum latency: %d ms. Public checks remain in the response history but do not affect availability or latency statistics.</p><h2>Service summary</h2><table><thead><tr><th>Service</th><th>Responses</th><th>Authenticated availability</th><th>Average latency</th><th>Maximum latency</th></tr></thead><tbody>", template.HTMLEscapeString(label), template.HTMLEscapeString(coverage), now.Format(time.RFC3339), totalChecks, len(summaries), overallAvailability, authenticatedChecks, overallAverage, maximumLatency)
 	for _, s := range summaries {
 		availability := 0.0
 		if s.authenticated > 0 {
 			availability = float64(s.healthy) * 100 / float64(s.authenticated)
 		}
-		fmt.Fprintf(w, "<tr><td>%s</td><td>%d</td><td>%.2f%% (%d checks)</td><td>%d ms</td><td>%d ms</td></tr>", template.HTMLEscapeString(s.name), s.total, availability, s.authenticated, s.average, s.maximum)
+		fmt.Fprintf(bufferedOutput, "<tr><td>%s</td><td>%d</td><td>%.2f%% (%d checks)</td><td>%d ms</td><td>%d ms</td></tr>", template.HTMLEscapeString(s.name), s.total, availability, s.authenticated, s.average, s.maximum)
 	}
-	fmt.Fprint(w, "</tbody></table><h2>Incident and recovery timeline</h2><table><thead><tr><th>Service</th><th>Opened</th><th>Resolved</th><th>State</th><th>Summary</th></tr></thead><tbody>")
-	for incidentRows.Next() {
-		var name, state, summary string
-		var opened int64
-		var resolved sql.NullInt64
-		if err := incidentRows.Scan(&name, &opened, &resolved, &state, &summary); err != nil {
-			return
-		}
+	fmt.Fprint(bufferedOutput, "</tbody></table><h2>Incident and recovery timeline</h2><table><thead><tr><th>Service</th><th>Opened</th><th>Resolved</th><th>State</th><th>Summary</th></tr></thead><tbody>")
+	for _, incident := range incidents {
+		name, state, summary, opened, resolved := incident.name, incident.state, incident.summary, incident.opened, incident.resolved
 		resolvedText := "Ongoing"
 		if resolved.Valid {
 			resolvedText = time.Unix(resolved.Int64, 0).UTC().Format(time.RFC3339)
 		}
-		fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>", template.HTMLEscapeString(name), time.Unix(opened, 0).UTC().Format(time.RFC3339), template.HTMLEscapeString(resolvedText), template.HTMLEscapeString(state), template.HTMLEscapeString(summary))
+		fmt.Fprintf(bufferedOutput, "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>", template.HTMLEscapeString(name), time.Unix(opened, 0).UTC().Format(time.RFC3339), template.HTMLEscapeString(resolvedText), template.HTMLEscapeString(state), template.HTMLEscapeString(summary))
 	}
-	if err := incidentRows.Err(); err != nil {
-		a.log().Error("stream report incidents", "error", err)
-		fmt.Fprint(w, `<tr><td colspan="5">The incident timeline ended early because stored data could not be read.</td></tr>`)
+	fmt.Fprint(bufferedOutput, "</tbody></table><h2>Complete response history</h2><table><thead><tr><th>Service</th><th>Source</th><th>Result</th><th>Latency</th><th>HTTP/error</th><th>Checked</th><th>Incident</th></tr></thead><tbody>")
+	if _, err := responseFile.Seek(0, 0); err != nil {
+		a.log().Error("seek report spool", "error", err)
+		http.Error(w, "Could not generate report", 500)
+		return
 	}
-	fmt.Fprint(w, "</tbody></table><h2>Complete response history</h2><table><thead><tr><th>Service</th><th>Source</th><th>Result</th><th>Latency</th><th>HTTP/error</th><th>Checked</th><th>Incident</th></tr></thead><tbody>")
-	for rows.Next() {
-		var name, source, state string
-		var duration, checked int64
-		var hs sql.NullInt64
-		var code sql.NullString
-		var detail sql.NullString
-		var incident sql.NullInt64
-		if err := rows.Scan(&name, &source, &state, &duration, &hs, &code, &detail, &checked, &incident); err != nil {
-			return
-		}
-		result := state
-		if code.Valid {
-			result += ": " + code.String
-		}
-		if detail.Valid {
-			result += ": " + detail.String
-		}
-		httpValue := "—"
-		if hs.Valid {
-			httpValue = strconv.FormatInt(hs.Int64, 10)
-		}
-		incidentValue := "—"
-		if incident.Valid {
-			incidentValue = "#" + strconv.FormatInt(incident.Int64, 10)
-		}
-		fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td>%s</td><td>%d ms</td><td>%s</td><td>%s</td><td>%s</td></tr>", template.HTMLEscapeString(name), template.HTMLEscapeString(source), template.HTMLEscapeString(result), duration, template.HTMLEscapeString(httpValue), time.Unix(checked, 0).UTC().Format(time.RFC3339), template.HTMLEscapeString(incidentValue))
+	if _, err := io.Copy(bufferedOutput, responseFile); err != nil {
+		a.log().Error("copy report spool", "error", err)
+		http.Error(w, "Could not generate report", 500)
+		return
 	}
-	if err := rows.Err(); err != nil {
-		a.log().Error("stream report responses", "error", err)
-		fmt.Fprint(w, `<tr><td colspan="7">The response history ended early because stored data could not be read.</td></tr>`)
+	fmt.Fprint(bufferedOutput, "</tbody></table>")
+	if err := bufferedOutput.Flush(); err != nil {
+		a.log().Error("flush report output", "error", err)
+		http.Error(w, "Could not generate report", 500)
+		return
 	}
-	fmt.Fprint(w, "</tbody></table>")
+	if err := outputFile.Close(); err != nil {
+		a.log().Error("close report output", "error", err)
+		http.Error(w, "Could not generate report", 500)
+		return
+	}
+	output, err := os.Open(outputPath)
+	if err != nil {
+		a.log().Error("open report output", "error", err)
+		http.Error(w, "Could not generate report", 500)
+		return
+	}
+	defer output.Close()
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="debridup-report.html"`)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	_, _ = io.Copy(w, output)
 }

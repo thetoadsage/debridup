@@ -58,17 +58,42 @@ function providerButton(provider, selected) {
   return `<button type="button" class="history-provider ${selected ? 'selected' : ''}" data-history-provider="${Number(provider?.id) || 0}" aria-pressed="${selected}"><span class="state ${state}">${escapeHTML(stateLabel(provider?.state))}</span><span class="history-provider-name">${escapeHTML(provider?.name || 'Unnamed provider')}</span><span class="history-provider-detail">${availability}</span></button>`;
 }
 
+function timelineState(value) {
+  if (value === 'healthy') return 'healthy';
+  if (value === 'degraded' || value === 'slow') return 'degraded';
+  if (value === 'outage' || value === 'auth_failed' || value === 'api_issue' || value === 'connection_issue') return 'outage';
+  return 'unknown';
+}
+
 function statusTimeline(series, providerName, timeZone) {
   const points = validPoints(series);
   if (!points.length) return '<div class="history-status-empty">No status buckets in this period.</div>';
   const counts = new Map();
   for (const point of points) {
-    const state = stateClass(point.state);
+    const state = timelineState(point.state);
     counts.set(state, (counts.get(state) || 0) + 1);
   }
   const description = [...counts.entries()].map(([state, count]) => `${count} ${stateLabel(state).toLowerCase()}`).join(', ');
-  const segments = points.map(point => `<span class="history-status-segment ${stateClass(point.state)}" title="${escapeHTML(`${formatTimestamp(point.bucketStart, timeZone)} — ${stateLabel(point.state)}`)}"></span>`).join('');
-  return `<div class="history-status-block"><div class="history-status-heading"><strong>Status timeline</strong><span>${escapeHTML(description)}</span></div><div class="history-status-track" role="img" aria-label="${escapeHTML(`${providerName} status timeline: ${description}`)}">${segments}</div><div class="history-status-legend" aria-hidden="true"><span class="healthy">Healthy</span><span class="degraded">Degraded</span><span class="outage">Outage</span><span class="unknown">Unknown</span></div></div>`;
+  const runs = [];
+  for (const point of points) {
+    const state = timelineState(point.state);
+    const previous = runs[runs.length - 1];
+    if (previous?.state === state) previous.points.push(point);
+    else runs.push({state, points: [point]});
+  }
+  let offset = 0;
+  const segments = runs.map(run => {
+    const start = run.points[0].bucketStart;
+    const end = run.points[run.points.length - 1].bucketStart;
+    const title = `${stateLabel(run.state)} — ${formatTimestamp(start, timeZone)}${run.points.length > 1 ? ` to ${formatTimestamp(end, timeZone)}` : ''}`;
+    const segment = `<rect class="history-status-segment ${run.state}" x="${offset}" y="0" width="${run.points.length}" height="1"><title>${escapeHTML(title)}</title></rect>`;
+    offset += run.points.length;
+    return segment;
+  }).join('');
+  const anchors = [points[0], points[Math.floor((points.length - 1) / 2)], points[points.length - 1]];
+  const timeAnchors = anchors.map((point, index) => `<time datetime="${escapeHTML(new Date(point.bucketStart * 1000).toISOString())}">${escapeHTML(formatTimestamp(point.bucketStart, timeZone))}</time>`).filter((value, index, values) => values.indexOf(value) === index).join('');
+  const legend = ['healthy', 'degraded', 'outage', 'unknown'].map(state => `<span><i class="history-status-swatch ${state}" aria-hidden="true"></i>${stateLabel(state)}</span>`).join('');
+  return `<div class="history-status-block"><div class="history-status-heading"><strong>Status timeline</strong><span>${escapeHTML(description)}</span></div><svg class="history-status-track" viewBox="0 0 ${points.length} 1" preserveAspectRatio="none" role="img" aria-label="${escapeHTML(`${providerName} status timeline: ${description}`)}">${segments}</svg><div class="history-status-times">${timeAnchors}</div><div class="history-status-legend" aria-hidden="true">${legend}</div></div>`;
 }
 
 export function historyMarkup(data, selectedID, timeZone) {

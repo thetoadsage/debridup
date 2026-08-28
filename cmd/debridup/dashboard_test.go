@@ -201,8 +201,25 @@ func TestReportRanges(t *testing.T) {
 	}
 }
 
+func TestReportEmptyDatabase(t *testing.T) {
+	a := testApp(t)
+	a.db.SetMaxOpenConns(1)
+	if err := migrateDatabase(context.Background(), a.db); err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	a.routes().ServeHTTP(rr, authenticatedRequest(t, a, http.MethodGet, "/api/report?range=all"))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "No retained checks in this range") || !strings.Contains(rr.Body.String(), "0 retained responses across 0 services") {
+		t.Fatalf("empty report missing coverage or summary: %s", rr.Body.String())
+	}
+}
+
 func TestReportIsSafeAndUsesAuthenticatedStatistics(t *testing.T) {
 	a := testApp(t)
+	a.db.SetMaxOpenConns(1)
 	if err := migrateDatabase(context.Background(), a.db); err != nil {
 		t.Fatal(err)
 	}

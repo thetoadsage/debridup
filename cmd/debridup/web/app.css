@@ -162,6 +162,7 @@ body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 var(
 button, input, select { font: inherit; }
 button, a, input, select, [tabindex] { outline: none; }
 button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.dashboard-main[tabindex="-1"]:focus { outline: none; }
 
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .skip-link { position: fixed; z-index: 100; top: 10px; left: 10px; padding: 9px 12px; border-radius: var(--control-radius); background: var(--accent); color: var(--accent-contrast); font-weight: 750; text-decoration: none; transform: translateY(-160%); }
@@ -271,14 +272,23 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .history-status-block { margin-top: 16px; }
 .history-status-heading { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 7px; color: var(--muted); font-size: 11px; }
 .history-status-heading strong { color: var(--text); font-size: 12px; }
-.history-status-track { display: flex; height: 18px; overflow: hidden; gap: 1px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-inset); }
-.history-status-segment { flex: 1 1 0; min-width: 2px; }
-.history-status-segment.healthy { background: var(--status-healthy); }
-.history-status-segment.degraded { background: repeating-linear-gradient(135deg, var(--status-warning) 0 3px, var(--status-warning-bg) 3px 6px); }
-.history-status-segment.outage { background: repeating-linear-gradient(45deg, var(--status-danger) 0 3px, var(--status-danger-bg) 3px 6px); }
-.history-status-segment.unknown { background: repeating-linear-gradient(90deg, var(--status-unknown-bg) 0 3px, var(--status-unknown) 3px 4px); }
-.history-status-legend { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; color: var(--muted); font-size: 10px; }
-.history-status-legend span { padding: 2px 6px; border-radius: 999px; }
+.history-status-track { display: block; width: 100%; height: 22px; overflow: hidden; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-inset); }
+.history-status-segment { stroke: none; }
+.history-status-segment.healthy { fill: var(--status-healthy); }
+.history-status-segment.degraded { fill: var(--status-warning); }
+.history-status-segment.outage { fill: var(--status-danger); }
+.history-status-segment.unknown { fill: var(--status-unknown); }
+.history-status-times { display: flex; justify-content: space-between; gap: 8px; margin-top: 5px; color: var(--muted); font-size: 10px; }
+.history-status-times time { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-status-times time:nth-child(2) { text-align: center; }
+.history-status-times time:last-child { text-align: right; }
+.history-status-legend { display: flex; flex-wrap: wrap; gap: 13px; margin-top: 9px; color: var(--muted); font-size: 10px; }
+.history-status-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.history-status-swatch { width: 10px; height: 10px; border-radius: 2px; }
+.history-status-swatch.healthy { background: var(--status-healthy); }
+.history-status-swatch.degraded { background: var(--status-warning); }
+.history-status-swatch.outage { background: var(--status-danger); }
+.history-status-swatch.unknown { background: var(--status-unknown); }
 .history-status-empty { margin-top: 16px; padding: 10px; border: 1px dashed var(--border); color: var(--muted); font-size: 12px; text-align: center; }
 .chart-legend { display: flex; flex-wrap: wrap; gap: 12px; margin: 17px 0 6px; color: var(--muted); font-size: 11px; }
 .chart-legend span { display: inline-flex; align-items: center; gap: 5px; }

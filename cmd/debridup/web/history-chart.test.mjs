@@ -35,14 +35,27 @@ test('p50 and p95 paths share the same vertical scale', () => {
   assert.match(html, /latency-p95[^>]+d="M70\.0,34\.0 L686\.0,34\.0"/);
 });
 
-test('history markup has accessible selector, status text, and no inline styles', () => {
+test('history markup has accessible selector, readable status timeline, and matching legend', () => {
   const html = historyMarkup({providers: [{id: 5, name: '<Provider>', state: 'healthy', availability: 99.5, p50Ms: 20, p95Ms: 30, slowestMs: 45, series}]}, 5, 'UTC');
   assert.match(html, /data-history-provider="5"/);
   assert.match(html, /aria-pressed="true"/);
   assert.match(html, /Accessible data summary/);
   assert.match(html, /Status timeline/);
   assert.match(html, /&lt;Provider&gt;/);
+  assert.match(html, /history-status-swatch healthy/);
+  assert.match(html, /history-status-times/);
   assert.doesNotMatch(html, /style=/);
+});
+
+test('status timeline groups adjacent states into proportional semantic runs', () => {
+  const html = historyMarkup({providers: [{id: 5, name: 'Provider', state: 'healthy', series: [
+    {bucketStart: 1, state: 'healthy'}, {bucketStart: 2, state: 'healthy'},
+    {bucketStart: 3, state: 'outage'}, {bucketStart: 4, state: 'unknown'},
+  ]}]}, 5, 'UTC');
+  assert.equal((html.match(/history-status-segment /g) || []).length, 3);
+  assert.match(html, /class="history-status-segment healthy" x="0" y="0" width="2"/);
+  assert.match(html, /class="history-status-segment outage" x="2" y="0" width="1"/);
+  assert.match(html, /history-status-swatch outage/);
 });
 
 test('history falls back to the first provider when a selected provider disappears', () => {
