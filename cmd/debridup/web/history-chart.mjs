@@ -52,10 +52,30 @@ export function chartMarkup(provider, timeZone) {
   return `<div class="chart-scroll"><svg class="latency-chart" viewBox="0 0 720 278" role="img" aria-labelledby="latency-chart-title latency-chart-description"><title id="latency-chart-title">Latency history for ${escapeHTML(provider?.name || 'selected provider')}</title><desc id="latency-chart-description">Solid line is p50 latency. Dashed line is p95 latency. Missing samples appear as gaps.</desc><g class="history-grid"><line x1="70" y1="34" x2="686" y2="34"></line><line x1="70" y1="115" x2="686" y2="115"></line><line x1="70" y1="196" x2="686" y2="196"></line></g><g class="history-axis"><text class="history-axis-label" x="62" y="38" text-anchor="end">${yLabel(max)}</text><text class="history-axis-label" x="62" y="119" text-anchor="end">${yLabel(max / 2)}</text><text class="history-axis-label" x="62" y="200" text-anchor="end">0 ms</text>${chartTicks(series, timeZone)}</g><path class="latency-line latency-p50" d="${p50}"></path><path class="latency-line latency-p95" d="${p95}"></path></svg></div>`;
 }
 
+export function comparisonChartMarkup(providers, timeZone) {
+  const visible = (Array.isArray(providers) ? providers : []).map((provider, index) => ({provider, index}));
+  const buckets = [...new Set(visible.flatMap(({provider}) => validPoints(provider?.series).map(point => point.bucketStart)))].sort((a, b) => a - b);
+  const numeric = visible.flatMap(({provider}) => validPoints(provider?.series).map(point => point.p50Ms)).filter(Number.isFinite);
+  if (!numeric.length) return '<div class="history-empty"><strong>No latency samples in this period</strong><p>Checks without a measured response time are shown as gaps, never estimated lines.</p></div>';
+  const max = Math.max(1, ...numeric);
+  const paths = visible.map(({provider, index}) => {
+    const byBucket = new Map(validPoints(provider?.series).map(point => [point.bucketStart, point]));
+    const aligned = buckets.map(bucketStart => byBucket.get(bucketStart) || {bucketStart, p50Ms: null});
+    const path = latencyPath(aligned, 'p50Ms', 720, 230, 70, max, 34, 34);
+    if (!path) return '';
+    return `<path class="latency-line comparison-line comparison-color-${index % 8} comparison-pattern-${Math.floor(index / 8) % 3}" data-comparison-provider="${Number(provider?.id) || 0}" d="${path}"><title>${escapeHTML(provider?.name || 'Unnamed provider')} p50 latency</title></path>`;
+  }).join('');
+  return `<div class="chart-scroll"><svg class="latency-chart" viewBox="0 0 720 278" role="img" aria-labelledby="comparison-chart-title comparison-chart-description"><title id="comparison-chart-title">Latency comparison for all services</title><desc id="comparison-chart-description">Each line shows one service's p50 latency on a shared scale. Missing samples appear as gaps.</desc><g class="history-grid"><line x1="70" y1="34" x2="686" y2="34"></line><line x1="70" y1="115" x2="686" y2="115"></line><line x1="70" y1="196" x2="686" y2="196"></line></g><g class="history-axis"><text class="history-axis-label" x="62" y="38" text-anchor="end">${Math.round(max)} ms</text><text class="history-axis-label" x="62" y="119" text-anchor="end">${Math.round(max / 2)} ms</text><text class="history-axis-label" x="62" y="200" text-anchor="end">0 ms</text>${chartTicks(buckets.map(bucketStart => ({bucketStart})), timeZone)}</g>${paths}</svg></div>`;
+}
+
 function providerButton(provider, selected) {
   const state = stateClass(provider?.state);
   const availability = Number.isFinite(provider?.availability) ? `${provider.availability.toFixed(1)}% availability` : 'No availability data';
   return `<button type="button" class="history-provider ${selected ? 'selected' : ''}" data-history-provider="${Number(provider?.id) || 0}" aria-pressed="${selected}"><span class="state ${state}">${escapeHTML(stateLabel(provider?.state))}</span><span class="history-provider-name">${escapeHTML(provider?.name || 'Unnamed provider')}</span><span class="history-provider-detail">${availability}</span></button>`;
+}
+
+function compareButton(providerCount, selected) {
+  return `<button type="button" class="history-provider history-provider-all ${selected ? 'selected' : ''}" data-history-provider="all" aria-pressed="${selected}"><span class="history-provider-all-mark" aria-hidden="true">ALL</span><span class="history-provider-name">All services</span><span class="history-provider-detail">Compare ${providerCount} configured ${providerCount === 1 ? 'service' : 'services'}</span></button>`;
 }
 
 function timelineState(value) {
@@ -98,10 +118,17 @@ function statusTimeline(series, providerName, timeZone) {
 
 export function historyMarkup(data, selectedID, timeZone) {
   const providers = Array.isArray(data?.providers) ? data.providers : [];
-  const selected = providers.find(provider => Number(provider.id) === Number(selectedID)) || providers[0];
-  if (!selected) return '<div class="history-empty"><strong>No providers configured</strong><p>Add a provider in Settings to begin building service history.</p><a href="#settings">Open provider settings</a></div>';
+  if (!providers.length) return '<div class="history-empty"><strong>No providers configured</strong><p>Add a provider in Settings to begin building service history.</p><a href="#settings">Open provider settings</a></div>';
+  const compareAll = selectedID === 'all';
+  const selected = compareAll ? null : providers.find(provider => Number(provider.id) === Number(selectedID)) || providers[0];
+  const buttons = `${compareButton(providers.length, compareAll)}${providers.map(provider => providerButton(provider, !compareAll && Number(provider.id) === Number(selected.id))).join('')}`;
+  if (compareAll) {
+    const legend = providers.map((provider, index) => `<span><i class="comparison-swatch comparison-color-${index % 8} comparison-pattern-${Math.floor(index / 8) % 3}" aria-hidden="true"></i>${escapeHTML(provider?.name || 'Unnamed provider')}</span>`).join('');
+    const rows = providers.map(provider => `<tr><th scope="row">${escapeHTML(provider?.name || 'Unnamed provider')}</th><td><span class="state ${stateClass(provider?.state)}">${escapeHTML(stateLabel(provider?.state))}</span></td><td>${Number.isFinite(provider?.availability) ? `${provider.availability.toFixed(1)}%` : '—'}</td><td>${escapeHTML(formatLatency(provider?.p50Ms))}</td><td>${escapeHTML(formatLatency(provider?.p95Ms))}</td><td>${escapeHTML(formatLatency(provider?.slowestMs))}</td></tr>`).join('');
+    return `<div class="history-layout"><section class="history-provider-list" aria-label="Providers">${buttons}</section><div class="history-detail"><div class="chart-legend comparison-legend" aria-label="Service comparison chart legend">${legend}<span>p50 response time · All times shown in ${escapeHTML(timeZone === 'browser' ? 'your browser time' : timeZone)}</span></div>${comparisonChartMarkup(providers, timeZone)}<div class="table-scroll comparison-summary-scroll" tabindex="0" aria-label="Scrollable service comparison table"><table class="provider-table comparison-summary-table"><caption>Service history comparison</caption><thead><tr><th scope="col">Service</th><th scope="col">Current state</th><th scope="col">Availability</th><th scope="col">p50</th><th scope="col">p95</th><th scope="col">Slowest</th></tr></thead><tbody>${rows}</tbody></table></div></div></div>`;
+  }
   const availability = Number.isFinite(selected.availability) ? `${selected.availability.toFixed(1)}%` : '—';
-  return `<div class="history-layout"><section class="history-provider-list" aria-label="Providers">${providers.map(provider => providerButton(provider, Number(provider.id) === Number(selected.id))).join('')}</section><div class="history-detail"><div class="history-metrics" aria-label="${escapeHTML(selected.name)} summary"><div><span>Availability</span><strong>${availability}</strong></div><div><span>p50 latency</span><strong>${escapeHTML(formatLatency(selected.p50Ms))}</strong></div><div><span>p95 latency</span><strong>${escapeHTML(formatLatency(selected.p95Ms))}</strong></div><div><span>Slowest</span><strong>${escapeHTML(formatLatency(selected.slowestMs))}</strong></div><div><span>Current state</span><strong>${escapeHTML(stateLabel(selected.state))}</strong></div></div>${statusTimeline(selected.series, selected.name || 'Selected provider', timeZone)}<div class="chart-legend" aria-label="Latency chart legend"><span><i class="legend-line p50" aria-hidden="true"></i>p50 response time</span><span><i class="legend-line p95" aria-hidden="true"></i>p95 response time</span><span>All times shown in ${escapeHTML(timeZone === 'browser' ? 'your browser time' : timeZone)}</span></div>${chartMarkup(selected, timeZone)}<details class="history-text-summary"><summary>Accessible data summary</summary><p>${escapeHTML(selected.name)} is currently ${escapeHTML(stateLabel(selected.state))}. Availability is ${availability}; p50 is ${escapeHTML(formatLatency(selected.p50Ms))}; p95 is ${escapeHTML(formatLatency(selected.p95Ms))}.</p><div class="table-scroll"><table class="provider-table history-summary-table"><caption>Bucketed service history for ${escapeHTML(selected.name)}</caption><thead><tr><th scope="col">Time</th><th scope="col">State</th><th scope="col">Availability</th><th scope="col">p50</th><th scope="col">p95</th></tr></thead><tbody>${validPoints(selected.series).map(point => `<tr><th scope="row">${escapeHTML(formatTimestamp(point.bucketStart, timeZone))}</th><td><span class="state ${stateClass(point.state)}">${escapeHTML(stateLabel(point.state))}</span></td><td>${Number.isFinite(point.availability) ? `${point.availability.toFixed(1)}%` : '—'}</td><td>${escapeHTML(formatLatency(point.p50Ms))}</td><td>${escapeHTML(formatLatency(point.p95Ms))}</td></tr>`).join('')}</tbody></table></div></details></div></div>`;
+  return `<div class="history-layout"><section class="history-provider-list" aria-label="Providers">${buttons}</section><div class="history-detail"><div class="history-metrics" aria-label="${escapeHTML(selected.name)} summary"><div><span>Availability</span><strong>${availability}</strong></div><div><span>p50 latency</span><strong>${escapeHTML(formatLatency(selected.p50Ms))}</strong></div><div><span>p95 latency</span><strong>${escapeHTML(formatLatency(selected.p95Ms))}</strong></div><div><span>Slowest</span><strong>${escapeHTML(formatLatency(selected.slowestMs))}</strong></div><div><span>Current state</span><strong>${escapeHTML(stateLabel(selected.state))}</strong></div></div>${statusTimeline(selected.series, selected.name || 'Selected provider', timeZone)}<div class="chart-legend" aria-label="Latency chart legend"><span><i class="legend-line p50" aria-hidden="true"></i>p50 response time</span><span><i class="legend-line p95" aria-hidden="true"></i>p95 response time</span><span>All times shown in ${escapeHTML(timeZone === 'browser' ? 'your browser time' : timeZone)}</span></div>${chartMarkup(selected, timeZone)}<details class="history-text-summary"><summary>Accessible data summary</summary><p>${escapeHTML(selected.name)} is currently ${escapeHTML(stateLabel(selected.state))}. Availability is ${availability}; p50 is ${escapeHTML(formatLatency(selected.p50Ms))}; p95 is ${escapeHTML(formatLatency(selected.p95Ms))}.</p><div class="table-scroll"><table class="provider-table history-summary-table"><caption>Bucketed service history for ${escapeHTML(selected.name)}</caption><thead><tr><th scope="col">Time</th><th scope="col">State</th><th scope="col">Availability</th><th scope="col">p50</th><th scope="col">p95</th></tr></thead><tbody>${validPoints(selected.series).map(point => `<tr><th scope="row">${escapeHTML(formatTimestamp(point.bucketStart, timeZone))}</th><td><span class="state ${stateClass(point.state)}">${escapeHTML(stateLabel(point.state))}</span></td><td>${Number.isFinite(point.availability) ? `${point.availability.toFixed(1)}%` : '—'}</td><td>${escapeHTML(formatLatency(point.p50Ms))}</td><td>${escapeHTML(formatLatency(point.p95Ms))}</td></tr>`).join('')}</tbody></table></div></details></div></div>`;
 }
 
 export function startServiceHistory({api, document, timeZone = 'browser'} = {}) {
@@ -130,7 +157,7 @@ export function startServiceHistory({api, document, timeZone = 'browser'} = {}) 
       lastGood = data;
       lastGoodRange = range;
       const providers = Array.isArray(data.providers) ? data.providers : [];
-      if (!providers.some(provider => Number(provider.id) === Number(selectedID))) selectedID = providers[0]?.id ?? null;
+      if (selectedID !== 'all' && !providers.some(provider => Number(provider.id) === Number(selectedID))) selectedID = providers[0]?.id ?? null;
       render(`Showing ${RANGE_LABELS[range] || range} of service history.`);
     } catch (error) {
       if (version !== requestVersion) return;
@@ -151,7 +178,7 @@ export function startServiceHistory({api, document, timeZone = 'browser'} = {}) 
     const retry = event.target?.closest?.('[data-history-retry]');
     if (retry) { void refresh(); return; }
     const provider = event.target?.closest?.('[data-history-provider]');
-    if (provider) { selectedID = Number(provider.dataset.historyProvider); render(); }
+    if (provider) { selectedID = provider.dataset.historyProvider === 'all' ? 'all' : Number(provider.dataset.historyProvider); render(); }
   });
   void refresh();
   return {refresh, setTimeZone(value) { zone = value; render(); }};
