@@ -233,8 +233,8 @@ func TestReportIsSafeAndUsesAuthenticatedStatistics(t *testing.T) {
 		source, state, code string
 		duration            int64
 	}{
-		{"authenticated", stateHealthy, "", 100},
-		{"authenticated", stateAPI, `<server_error>`, 300},
+		{"authenticated", stateHealthy, "", 101},
+		{"authenticated", stateAPI, `<server_error>`, 102},
 		{"public", stateHealthy, "", 1000},
 	}
 	for index, check := range checks {
@@ -254,7 +254,7 @@ func TestReportIsSafeAndUsesAuthenticatedStatistics(t *testing.T) {
 		t.Fatalf("csp=%q", got)
 	}
 	body := rr.Body.String()
-	for _, expected := range []string{"&lt;Unsafe &amp; Service&gt;", "Authenticated availability: 50.00% (2 checks)", "Average latency: 200 ms", "maximum latency: 300 ms", "&lt;server_error&gt;"} {
+	for _, expected := range []string{"&lt;Unsafe &amp; Service&gt;", "Authenticated availability: 50.00% (2 checks)", "Average latency: 102 ms", "maximum latency: 102 ms", "&lt;server_error&gt;"} {
 		if !strings.Contains(body, expected) {
 			t.Errorf("report missing %q", expected)
 		}

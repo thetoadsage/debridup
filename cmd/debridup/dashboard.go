@@ -757,10 +757,12 @@ func (a *app) report(w http.ResponseWriter, r *http.Request) {
 		}
 		for rows.Next() {
 			var s serviceSummary
-			if err := rows.Scan(&s.name, &s.total, &s.authenticated, &s.healthy, &s.average, &s.maximum); err != nil {
+			var average float64
+			if err := rows.Scan(&s.name, &s.total, &s.authenticated, &s.healthy, &average, &s.maximum); err != nil {
 				rows.Close()
 				return fmt.Errorf("scan report summary: %w", err)
 			}
+			s.average = int64(math.Round(average))
 			summaries = append(summaries, s)
 		}
 		if err := rows.Err(); err != nil {
