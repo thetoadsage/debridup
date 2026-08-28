@@ -30,7 +30,7 @@ function eventTarget(attributes = {}) {
 }
 
 function fixture(hash = '') {
-  const labels = {dashboard: 'Dashboard', incidents: 'Incidents', providers: 'Providers', history: 'Service history', settings: 'Settings'};
+  const labels = {dashboard: 'Dashboard', incidents: 'Incidents', history: 'Service history', settings: 'Settings'};
   const links = Object.entries(labels).map(([view, label]) => ({
     ...eventTarget({'data-view-link': view, href: `#${view}`}),
     dataset: {view, viewLink: view},
@@ -68,7 +68,7 @@ function activeView(views) {
 }
 
 test('uses the dashboard for an empty or invalid hash and exposes one view', () => {
-  for (const hash of ['', '#missing']) {
+  for (const hash of ['', '#missing', '#providers']) {
     const {document, window, links, views} = fixture(hash);
     const navigation = setupSectionNavigation({document, window});
     assert.equal(activeView(views).dataset.view, 'dashboard');
@@ -82,17 +82,17 @@ test('uses the dashboard for an empty or invalid hash and exposes one view', () 
 });
 
 test('activates the hash-selected view, updates the title, and focuses main content', () => {
-  const {document, window, links, views, main} = fixture('#providers');
+  const {document, window, links, views, main} = fixture('#history');
   const navigation = setupSectionNavigation({document, window});
-  assert.equal(activeView(views).dataset.view, 'providers');
-  assert.equal(links[2].classList.contains('active'), true);
-  assert.equal(document.title, 'Providers · DebridUp');
-
-  window.location.hash = '#history';
-  window.dispatch('hashchange');
   assert.equal(activeView(views).dataset.view, 'history');
-  assert.equal(links[3].getAttribute('aria-current'), 'page');
+  assert.equal(links[2].classList.contains('active'), true);
   assert.equal(document.title, 'Service history · DebridUp');
+
+  window.location.hash = '#settings';
+  window.dispatch('hashchange');
+  assert.equal(activeView(views).dataset.view, 'settings');
+  assert.equal(links[3].getAttribute('aria-current'), 'page');
+  assert.equal(document.title, 'Settings · DebridUp');
   assert.equal(main.focused, 1);
   navigation.stop();
 });

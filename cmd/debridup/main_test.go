@@ -453,6 +453,23 @@ func TestDashboardHTMLContainsAccessibleLandmarks(t *testing.T) {
 	}
 }
 
+func TestProviderHealthLivesOnDashboardWithoutASeparateView(t *testing.T) {
+	b, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(b)
+	if strings.Contains(html, `data-view-link="providers"`) || strings.Contains(html, `data-view="providers"`) {
+		t.Fatal("provider health must not have a separate navigation tab or view")
+	}
+	summary := strings.Index(html, `id="summary"`)
+	providers := strings.Index(html, `id="providers-panel"`)
+	incidents := strings.Index(html, `id="incidents-view"`)
+	if summary < 0 || providers <= summary || incidents <= providers {
+		t.Fatal("provider health panel must appear below the dashboard summary tiles")
+	}
+}
+
 func TestDashboardAssetsContainResponsiveMonitorDialog(t *testing.T) {
 	htmlBytes, err := webFS.ReadFile("web/index.html")
 	if err != nil {

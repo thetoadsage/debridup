@@ -111,7 +111,7 @@ The old overview, monitor, check, and incident routes remain unchanged for compa
 
 - Availability is successful checks divided by completed checks in the selected range.
 - p50 and p95 are calculated from completed latency samples using a documented nearest-rank method.
-- A pulse bucket is healthy when every completed check succeeds, degraded when at least one succeeds and one fails, and outage when all completed checks fail.
+- A pulse bucket is healthy when every completed check succeeds, degraded when at least one succeeds and one fails, and outage when all completed checks fail. Any bucket overlapping a confirmed incident is also outage so the timeline remains consistent with incident notifications.
 - A bucket with no completed checks is unknown and is not counted as downtime.
 - Checks completed today use UTC day boundaries, matching stored timestamps.
 

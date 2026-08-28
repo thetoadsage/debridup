@@ -178,6 +178,7 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 	}
 	providers := make([]providerState, 0)
 	rollupsByMonitor := make(map[int64][]rollupPoint)
+	incidentsByMonitor := make(map[int64][]dashboardIncident)
 	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	err := a.withReadOnlyDashboardTransaction(ctx, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `SELECT m.id,m.name,m.provider,m.enabled,m.timeout_seconds,
@@ -274,6 +275,7 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 				response.Summary.ActiveIncidents++
 			}
 			response.Incidents = append(response.Incidents, incident)
+			incidentsByMonitor[incident.MonitorID] = append(incidentsByMonitor[incident.MonitorID], incident)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -295,6 +297,7 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 		}
 		points := rollupsByMonitor[provider.provider.ID]
 		provider.provider.Series = seriesFromRollups(points, firstBucket, lastBucket, width, spec.MaxPoints)
+		overlayIncidentStates(provider.provider.Series, incidentsByMonitor[provider.provider.ID], width)
 
 		var total, healthy, slowest int64
 		for _, point := range points {
@@ -385,6 +388,26 @@ func seriesFromRollups(points []rollupPoint, firstBucket, lastBucket, width int6
 		series = append(series, point)
 	}
 	return series
+}
+
+// overlayIncidentStates makes the pulse timeline agree with confirmed incident
+// notifications. A range bucket can contain healthy checks before or after a
+// short outage, so raw rollups alone would otherwise dilute that outage into a
+// degraded bucket. Metrics remain the raw measurements for the whole bucket.
+func overlayIncidentStates(series []dashboardPoint, incidents []dashboardIncident, width int64) {
+	if width <= 0 {
+		return
+	}
+	for i := range series {
+		bucketStart := series[i].BucketStart
+		bucketEnd := bucketStart + width
+		for _, incident := range incidents {
+			if incident.OpenedAt < bucketEnd && (incident.ResolvedAt == nil || *incident.ResolvedAt > bucketStart) {
+				series[i].State = "outage"
+				break
+			}
+		}
+	}
 }
 
 // weightedPercentile estimates a percentile across the window from the stored

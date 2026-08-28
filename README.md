@@ -47,9 +47,8 @@ Use a TLS reverse proxy before making DebridUp available outside a trusted priva
 
 ## Using DebridUp
 
-- **Dashboard** gives an at-a-glance health summary.
+- **Dashboard** gives an at-a-glance health summary and the latest status and response time for every configured service.
 - **Incidents** lists current and recovered incidents.
-- **Providers** shows the latest status and response time for every configured service.
 - **Service history** shows availability, status changes, and latency trends.
 - **Settings** manages providers, ntfy notifications, display time zone, and theme.
 - **Report** downloads a self-contained HTML report for the selected period.

@@ -327,6 +327,9 @@ func TestDashboardSnapshotReturnsSummaryAndProviderMetrics(t *testing.T) {
 	if first.Name != "Provider Alpha" || first.State != stateHealthy || first.Availability == nil || *first.Availability != 50 || first.P50MS == nil || *first.P50MS != 100 || first.P95MS == nil || *first.P95MS != 300 || first.SlowestMS == nil || *first.SlowestMS != 300 {
 		t.Fatalf("first provider=%#v", first)
 	}
+	if !slices.ContainsFunc(first.Series, func(point dashboardPoint) bool { return point.State == "outage" }) {
+		t.Fatal("confirmed incident was not represented as an outage in provider history")
+	}
 	third := got.Providers[2]
 	if third.State != "unknown" || third.StateSince != nil || third.LastCheck != nil || third.Availability != nil || third.P50MS != nil || third.P95MS != nil || third.SlowestMS != nil {
 		t.Fatalf("provider without current data=%#v", third)
@@ -361,6 +364,49 @@ func TestDashboardSnapshotSupportsRangesWithBoundedChronologicalSeries(t *testin
 				}
 			}
 		})
+	}
+}
+
+func TestDashboardSnapshotShowsShortConfirmedOutageInsideMixedBucket(t *testing.T) {
+	a := testApp(t)
+	if err := migrateDatabase(context.Background(), a.db); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	result, err := a.db.Exec(`INSERT INTO monitors(provider,name,created_at,updated_at) VALUES('torbox','TorBox',?,?)`, now.Add(-24*time.Hour).Unix(), now.Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitorID, _ := result.LastInsertId()
+	if _, err := a.db.Exec(`INSERT INTO monitor_states(monitor_id,current_state,state_since,last_raw_state,last_check_at) VALUES(?,?,?,?,?)`, monitorID, stateHealthy, now.Add(-45*time.Minute).Unix(), stateHealthy, now.Add(-45*time.Minute).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	for i, state := range []string{stateHealthy, stateAPI, stateAPI, stateAPI, stateHealthy} {
+		checkedAt := now.Add(-105*time.Minute + time.Duration(i)*15*time.Minute).Unix()
+		if _, err := a.db.Exec(`INSERT INTO check_results(monitor_id,source,state,duration_ms,checked_at) VALUES(?,'authenticated',?,100,?)`, monitorID, state, checkedAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	opened := now.Add(-90 * time.Minute).Unix()
+	resolved := now.Add(-45 * time.Minute).Unix()
+	if _, err := a.db.Exec(`INSERT INTO incidents(monitor_id,opened_at,detected_at,resolved_at,initial_state,latest_state,summary) VALUES(?,?,?,?,?,?,?)`, monitorID, opened, now.Add(-60*time.Minute).Unix(), resolved, stateAPI, stateAPI, "Confirmed outage"); err != nil {
+		t.Fatal(err)
+	}
+	if err := rebuildRollups(context.Background(), a.db, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, _ := parseDashboardRange("7d")
+	got, err := a.dashboardSnapshot(context.Background(), spec, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	point := got.Providers[0].Series[len(got.Providers[0].Series)-1]
+	if point.State != "outage" {
+		t.Fatalf("mixed two-hour bucket with a confirmed outage = %q, want outage", point.State)
+	}
+	if point.Availability == nil || *point.Availability != 40 {
+		t.Fatalf("incident overlay changed raw bucket availability: %v", point.Availability)
 	}
 }
 
@@ -739,6 +785,34 @@ func TestSeriesFromRollupsRejectsDegenerateInput(t *testing.T) {
 	}
 	if got := seriesFromRollups(nil, 0, 900, 900, 0); len(got) != 0 {
 		t.Fatalf("zero maxPoints should produce no points, got %d", len(got))
+	}
+}
+
+func TestOverlayIncidentStatesMarksEveryOverlappingBucket(t *testing.T) {
+	width := int64(900)
+	first := int64(1787313600)
+	availability := 50.0
+	series := []dashboardPoint{
+		{BucketStart: first, State: "healthy", Availability: &availability},
+		{BucketStart: first + width, State: "degraded"},
+		{BucketStart: first + 2*width, State: "healthy"},
+		{BucketStart: first + 3*width, State: "unknown"},
+	}
+	resolved := first + 2*width
+	incidents := []dashboardIncident{
+		{OpenedAt: first + width/2, ResolvedAt: &resolved},
+		{OpenedAt: first + 3*width},
+	}
+
+	overlayIncidentStates(series, incidents, width)
+	want := []string{"outage", "outage", "healthy", "outage"}
+	for i, state := range want {
+		if series[i].State != state {
+			t.Fatalf("bucket %d state=%q, want %q", i, series[i].State, state)
+		}
+	}
+	if series[0].Availability == nil || *series[0].Availability != availability {
+		t.Fatal("incident overlay changed bucket metrics")
 	}
 }
 
