@@ -3,9 +3,11 @@ import {escapeHTML, formatState} from './dashboard-model.mjs';
 import {setupThemePicker} from './theme.mjs';
 import {formatTimestamp, setupTimeZonePicker} from './timezone.mjs';
 import {setupSectionNavigation} from './navigation.mjs';
+import {startServiceHistory} from './history-chart.mjs';
 
 const $ = selector => document.querySelector(selector);
-const SAFE_STATES = new Set(['healthy', 'auth_failed', 'api_issue', 'connection_issue', 'checking', 'unknown']);
+const SAFE_STATES = new Set(['healthy', 'slow', 'degraded', 'outage', 'auth_failed', 'api_issue', 'connection_issue', 'checking', 'unknown', 'paused']);
+const stateClass = value => SAFE_STATES.has(value) ? value : 'unknown';
 let ntfyConfigured = false;
 let editingMonitorID = null;
 let monitorConfigs = new Map();
@@ -26,18 +28,16 @@ const providerDetails = {
 setupThemePicker({document, storage: window.localStorage});
 setupSectionNavigation({document, window});
 let dashboard;
+let serviceHistory;
 const timeZonePicker = setupTimeZonePicker({
   document,
   storage: window.localStorage,
   onChange: timeZone => {
     renderMonitorSettings(Array.from(monitorConfigs.values()));
     dashboard?.setTimeZone(timeZone);
+    serviceHistory?.setTimeZone(timeZone);
   },
 });
-
-function stateClass(value) {
-  return SAFE_STATES.has(value) ? value : 'unknown';
-}
 
 function renderNtfy(config) {
   ntfyConfigured = Boolean(config.configured);
@@ -83,23 +83,38 @@ function renderMonitorSettings(monitors) {
   // does, so the refresh cycle cannot silently drop a focused Edit button.
   const signature = `${timeZonePicker.timeZone}|${JSON.stringify(items)}`;
   if (signature === renderedCardSignature) return;
-  const focusedID = document.activeElement?.closest?.('.edit-monitor')?.dataset?.monitorId ?? null;
+  const focusedButton = document.activeElement?.closest?.('.edit-monitor, .delete-monitor');
+  const focusedID = focusedButton?.dataset?.monitorId ?? null;
+  const focusedAction = focusedButton?.classList?.contains('delete-monitor') ? 'delete' : 'edit';
+  const enabledCount = items.filter(monitor => monitor.enabled).length;
+  $('#provider-settings-summary').textContent = `${items.length} configured · ${enabledCount} enabled`;
 
-  $('#cards').innerHTML = items.length ? items.map(monitor => {
-    const state = stateClass(monitor.state);
+  $('#provider-settings-list').innerHTML = items.length ? items.map(monitor => {
     const providerName = providerDetails[monitor.provider]?.name || monitor.provider;
-    return `<article class="card"><div class="section-title"><div><p class="provider-name">${escapeHTML(monitor.name)}</p><span class="provider">${escapeHTML(providerName)}</span></div><div class="card-status"><span class="state ${state}">${escapeHTML(formatState(monitor.state))}</span><button type="button" class="quiet edit-monitor" data-monitor-id="${Number(monitor.id) || 0}">Edit settings</button></div></div><div class="metric-grid"><div class="metric"><strong>${Number(monitor.intervalSeconds) || 0}s</strong><span>Check interval</span></div><div class="metric"><strong>${Number(monitor.timeoutSeconds) || 0}s</strong><span>Timeout</span></div><div class="metric"><strong>${Number(monitor.failureThreshold) || 0}</strong><span>Failure confirmations</span></div><div class="metric"><strong>${escapeHTML(formatTimestamp(monitor.lastCheck, timeZonePicker.timeZone))}</strong><span>Last check</span></div></div></article>`;
-  }).join('') : '<article class="card"><p>No providers configured. Add a provider to begin monitoring.</p></article>';
+    const monitorID = Number(monitor.id) || 0;
+    const enabled = Boolean(monitor.enabled);
+    const state = stateClass(monitor.state);
+    return `<article class="provider-config-row"><div class="provider-config-identity"><p class="provider-name">${escapeHTML(monitor.name)}</p><span class="provider">${escapeHTML(providerName)}</span></div><div class="provider-config-details"><span class="config-detail ${enabled ? 'enabled' : 'paused'}">${enabled ? 'Enabled' : 'Paused'}</span><span class="config-detail config-state ${state}">${escapeHTML(formatState(monitor.state))}</span><span class="config-detail ${monitor.configured ? 'enabled' : 'paused'}">${monitor.configured ? 'Credential stored' : 'Credential required'}</span><span class="config-detail">Every ${Number(monitor.intervalSeconds) || 0}s</span><span class="config-detail">${Number(monitor.timeoutSeconds) || 0}s timeout</span><span class="config-detail">${Number(monitor.failureThreshold) || 0} failure${Number(monitor.failureThreshold) === 1 ? '' : 's'} / ${Number(monitor.recoveryThreshold) || 0} recovery</span><span class="config-detail">Last check: ${escapeHTML(formatTimestamp(monitor.lastCheck, timeZonePicker.timeZone))}</span>${monitor.publicCheck ? '<span class="config-detail">Public check on</span>' : ''}</div><div class="provider-config-actions"><button type="button" class="quiet edit-monitor" data-monitor-id="${monitorID}">Edit</button><button type="button" class="quiet danger-quiet delete-monitor" data-monitor-id="${monitorID}">Delete</button></div></article>`;
+  }).join('') : '<article class="provider-empty-state"><div><strong>No providers configured</strong><p class="muted">Add a provider to start checking service health.</p></div><button type="button" id="add-first-monitor">Add your first provider</button></article>';
   renderedCardSignature = signature;
   if (focusedID !== null) {
-    $(`.edit-monitor[data-monitor-id="${focusedID}"]`)?.focus?.();
+    $(`.${focusedAction}-monitor[data-monitor-id="${focusedID}"]`)?.focus?.();
   }
 }
 
 // Delegated once, rather than rebinding a listener per card on every render.
-$('#cards').addEventListener('click', event => {
+$('#provider-settings-list').addEventListener('click', event => {
+  if (event.target?.closest?.('#add-first-monitor')) {
+    openCreateMonitor();
+    return;
+  }
   const button = event.target?.closest?.('.edit-monitor');
-  if (button) openEditMonitor(monitorConfigs.get(Number(button.dataset.monitorId)));
+  if (button) {
+    openEditMonitor(monitorConfigs.get(Number(button.dataset.monitorId)));
+    return;
+  }
+  const deleteButton = event.target?.closest?.('.delete-monitor');
+  if (deleteButton) void deleteMonitor(monitorConfigs.get(Number(deleteButton.dataset.monitorId)));
 });
 
 async function loadMonitorSettings() {
@@ -122,6 +137,9 @@ function resetMonitorDialog() {
   $('#monitor-submit').textContent = 'Add provider';
   $('#delete-monitor').hidden = true;
   $('#reset-monitor-stats').hidden = true;
+  for (const selector of ['#monitor-submit', '#delete-monitor', '#reset-monitor-stats', '#close-dialog']) {
+    $(selector).disabled = false;
+  }
   $('#monitor-error').textContent = '';
 }
 
@@ -160,10 +178,18 @@ function openEditMonitor(config) {
   $('#monitor-dialog').showModal();
 }
 
+function setMonitorActionBusy(busy, label = '') {
+  for (const selector of ['#monitor-submit', '#delete-monitor', '#reset-monitor-stats', '#close-dialog']) {
+    $(selector).disabled = busy;
+  }
+  if (label) $('#monitor-submit').textContent = label;
+}
+
 function showManagementError(error) {
   console.error(error);
   renderedCardSignature = null;
-  $('#cards').innerHTML = '<article class="card"><p class="error">Unable to load provider settings. Refresh the page to retry.</p></article>';
+  $('#provider-settings-summary').textContent = 'Provider settings unavailable';
+  $('#provider-settings-list').innerHTML = '<article class="provider-empty-state"><p class="error">Unable to load provider settings. Refresh the page to retry.</p></article>';
 }
 
 dashboard = startDashboard({
@@ -174,8 +200,10 @@ dashboard = startDashboard({
   onRefresh: () => {
     if ($('#monitor-dialog').open) return;
     void loadMonitorSettings().catch(showManagementError);
+    void serviceHistory?.refresh();
   },
 });
+serviceHistory = startServiceHistory({api, document, timeZone: timeZonePicker.timeZone});
 
 $('#report-range').addEventListener('change', event => {
   $('#download-report').href = `/api/report?range=${encodeURIComponent(event.target.value)}`;
@@ -209,6 +237,8 @@ $('#monitor-form').addEventListener('submit', async event => {
   };
   if (editingMonitorID) payload.enabled = $('#monitor-enabled').checked;
   else payload.provider = $('#provider').value;
+  const submitLabel = editingMonitorID ? 'Save changes' : 'Add provider';
+  setMonitorActionBusy(true, editingMonitorID ? 'Saving…' : 'Adding…');
   try {
     await api(editingMonitorID ? `/api/monitors/${editingMonitorID}` : '/api/monitors', {
       method: editingMonitorID ? 'PUT' : 'POST',
@@ -216,35 +246,59 @@ $('#monitor-form').addEventListener('submit', async event => {
     });
     $('#monitor-dialog').close();
     resetMonitorDialog();
-    await Promise.all([loadMonitorSettings(), dashboard.refresh({supersede: true})]);
+    await Promise.all([loadMonitorSettings(), dashboard.refresh({supersede: true}), serviceHistory.refresh()]);
   } catch (error) {
     $('#monitor-error').textContent = error.message;
+  } finally {
+    if ($('#monitor-dialog').open) {
+      setMonitorActionBusy(false);
+      $('#monitor-submit').textContent = submitLabel;
+    }
   }
 });
-$('#delete-monitor').addEventListener('click', async () => {
-  if (!editingMonitorID) return;
-  const config = monitorConfigs.get(editingMonitorID);
+async function deleteMonitor(config) {
+  const monitorID = config?.id || editingMonitorID;
+  if (!monitorID) return;
   if (!window.confirm(`Delete ${config?.name || 'this provider'}? This permanently removes its checks and incident history.`)) return;
+  const rowActions = Array.from(document.querySelectorAll(`[data-monitor-id="${Number(monitorID)}"]`));
+  for (const action of rowActions) action.disabled = true;
+  setMonitorActionBusy(true, 'Deleting…');
   try {
-    await api(`/api/monitors/${editingMonitorID}`, {method: 'DELETE'});
+    await api(`/api/monitors/${monitorID}`, {method: 'DELETE'});
     $('#monitor-dialog').close();
     resetMonitorDialog();
-    await Promise.all([loadMonitorSettings(), dashboard.refresh({supersede: true})]);
+    await Promise.all([loadMonitorSettings(), dashboard.refresh({supersede: true}), serviceHistory.refresh()]);
   } catch (error) {
-    $('#monitor-error').textContent = error.message;
+    if ($('#monitor-dialog').open) $('#monitor-error').textContent = error.message;
+    else $('#provider-settings-summary').textContent = `Delete failed: ${error.message}`;
+  } finally {
+    for (const action of rowActions) action.disabled = false;
+    if ($('#monitor-dialog').open) {
+      setMonitorActionBusy(false);
+      $('#monitor-submit').textContent = 'Save changes';
+    }
   }
+}
+$('#delete-monitor').addEventListener('click', () => {
+  void deleteMonitor(monitorConfigs.get(editingMonitorID));
 });
 $('#reset-monitor-stats').addEventListener('click', async () => {
   if (!editingMonitorID) return;
   const config = monitorConfigs.get(editingMonitorID);
   if (!window.confirm(`Reset all stats for ${config?.name || 'this provider'}? Its checks and incident history will be permanently cleared. Provider settings and credentials will be kept.`)) return;
+  setMonitorActionBusy(true, 'Resetting…');
   try {
     await api(`/api/monitors/${editingMonitorID}/reset`, {method: 'POST'});
     $('#monitor-dialog').close();
     resetMonitorDialog();
-    await Promise.all([loadMonitorSettings(), dashboard.refresh({supersede: true})]);
+    await Promise.all([loadMonitorSettings(), dashboard.refresh({supersede: true}), serviceHistory.refresh()]);
   } catch (error) {
     $('#monitor-error').textContent = error.message;
+  } finally {
+    if ($('#monitor-dialog').open) {
+      setMonitorActionBusy(false);
+      $('#monitor-submit').textContent = 'Save changes';
+    }
   }
 });
 $('#reset-all-stats').addEventListener('click', async () => {
@@ -253,7 +307,7 @@ $('#reset-all-stats').addEventListener('click', async () => {
   button.disabled = true;
   try {
     await api('/api/stats/reset', {method: 'POST'});
-    await Promise.all([loadMonitorSettings(), dashboard.refresh({supersede: true})]);
+    await Promise.all([loadMonitorSettings(), dashboard.refresh({supersede: true}), serviceHistory.refresh()]);
   } catch (error) {
     showManagementError(error);
   } finally {

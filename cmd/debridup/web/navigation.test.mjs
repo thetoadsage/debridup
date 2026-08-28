@@ -30,7 +30,7 @@ function eventTarget(attributes = {}) {
 }
 
 function fixture(hash = '') {
-  const labels = {dashboard: 'Dashboard', incidents: 'Incidents', providers: 'Providers', history: 'Response history', settings: 'Settings'};
+  const labels = {dashboard: 'Dashboard', incidents: 'Incidents', providers: 'Providers', history: 'Service history', settings: 'Settings'};
   const links = Object.entries(labels).map(([view, label]) => ({
     ...eventTarget({'data-view-link': view, href: `#${view}`}),
     dataset: {view, viewLink: view},
@@ -92,7 +92,7 @@ test('activates the hash-selected view, updates the title, and focuses main cont
   window.dispatch('hashchange');
   assert.equal(activeView(views).dataset.view, 'history');
   assert.equal(links[3].getAttribute('aria-current'), 'page');
-  assert.equal(document.title, 'Response history · DebridUp');
+  assert.equal(document.title, 'Service history · DebridUp');
   assert.equal(main.focused, 1);
   navigation.stop();
 });

@@ -1,8 +1,37 @@
-.card-status { display: grid; justify-items: end; gap: 8px; }
-.edit-monitor { font-size: 12px; padding: 3px 7px; }
+.provider-settings-panel { display: grid; gap: 18px; }
+.provider-settings-head { align-items: center; }
+.provider-settings-list { display: grid; gap: 9px; }
+.provider-config-row, .provider-empty-state { display: grid; grid-template-columns: minmax(150px, .85fr) minmax(260px, 1.65fr) auto; gap: 18px; align-items: center; padding: 15px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-inset); }
+.provider-config-identity { min-width: 0; }
+.provider-name { margin: 0; color: var(--text); font-size: 15px; font-weight: 750; }
+.provider { color: var(--muted); font-size: 12px; text-transform: capitalize; }
+.provider-config-details { display: flex; flex-wrap: wrap; gap: 6px; }
+.config-detail { padding: 3px 7px; border-radius: 999px; background: var(--surface-raised); color: var(--muted); font-size: 11px; font-weight: 650; white-space: nowrap; }
+.config-detail.enabled, .config-detail.config-state.healthy { background: var(--status-healthy-bg); color: var(--status-healthy); }
+.config-detail.paused, .config-detail.config-state.unknown, .config-detail.config-state.checking { background: var(--status-unknown-bg); color: var(--status-unknown); }
+.config-detail.config-state.slow, .config-detail.config-state.degraded, .config-detail.config-state.connection_issue { background: var(--status-warning-bg); color: var(--status-warning); }
+.config-detail.config-state.outage, .config-detail.config-state.auth_failed, .config-detail.config-state.api_issue { background: var(--status-danger-bg); color: var(--status-danger); }
+.provider-config-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.edit-monitor, .delete-monitor { padding: 5px 9px; font-size: 12px; }
+.provider-empty-state { grid-template-columns: 1fr auto; min-height: 116px; }
+.provider-empty-state strong { font-size: 15px; }
+.provider-empty-state p { margin: 3px 0 0; font-size: 13px; }
 .close-button { font-size: 25px; line-height: 1; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; }
 .dialog-actions .danger { margin-right: auto; background: var(--status-danger-bg); color: var(--red); }
 .danger-quiet { background: transparent; border: 1px solid color-mix(in srgb, var(--red) 38%, var(--border)); color: var(--red); }
 .danger-quiet:hover { background: color-mix(in srgb, var(--status-danger-bg) 72%, transparent); }
 [hidden] { display: none !important; }
+
+@media (max-width: 760px) {
+  .provider-settings-head { align-items: stretch; flex-direction: column; }
+  .management-actions { justify-content: flex-end; }
+  .provider-config-row { grid-template-columns: 1fr auto; gap: 12px; }
+  .provider-config-details { grid-column: 1 / -1; }
+}
+
+@media (max-width: 560px) {
+  .provider-config-row, .provider-empty-state { grid-template-columns: 1fr; }
+  .provider-config-actions { justify-content: flex-start; }
+  .provider-empty-state button { justify-self: start; }
+}

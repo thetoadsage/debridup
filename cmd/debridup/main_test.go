@@ -444,7 +444,7 @@ func TestDashboardHTMLContainsAccessibleLandmarks(t *testing.T) {
 	html := string(b)
 	for _, required := range []string{
 		`<nav aria-label="Primary">`, `id="summary"`, `id="provider-table-body"`,
-		`id="check-log-body"`, `id="download-report"`, `id="report-range"`, `id="dashboard-status"`,
+		`id="history-content"`, `id="history-range"`, `id="download-report"`, `id="report-range"`, `id="dashboard-status"`,
 		`aria-live="polite"`, `id="theme-select"`,
 	} {
 		if !strings.Contains(html, required) {
@@ -485,14 +485,14 @@ func TestCurrentHealthTableLabelsTheLatestCheckAccurately(t *testing.T) {
 	}
 }
 
-func TestResponseHistoryStylesUseAResponsiveTable(t *testing.T) {
+func TestServiceHistoryStylesUseAResponsiveChart(t *testing.T) {
 	b, err := webFS.ReadFile("web/app.css")
 	if err != nil {
 		t.Fatal(err)
 	}
 	css := string(b)
-	if !strings.Contains(css, `.table-scroll { overflow-x: auto;`) {
-		t.Fatal("response history must remain usable on narrow screens")
+	if !strings.Contains(css, `.chart-scroll { overflow-x: auto;`) {
+		t.Fatal("service history chart must remain usable on narrow screens")
 	}
 }
 
