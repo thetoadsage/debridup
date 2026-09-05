@@ -352,6 +352,7 @@ func (a *app) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]bool{"ok": true}) })
 	mux.HandleFunc("GET /readyz", a.readiness)
+	mux.HandleFunc("GET /integrations/health/{provider}", a.providerHealth)
 	mux.HandleFunc("POST /login", a.login)
 	mux.HandleFunc("POST /logout", a.logout)
 	mux.HandleFunc("GET /api/dashboard", a.auth(a.dashboard))

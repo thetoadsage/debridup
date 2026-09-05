@@ -90,6 +90,29 @@ For a live database, use SQLite's online backup mechanism instead of copying onl
 
 `GET /healthz` checks process health. `GET /readyz` also confirms that the database is ready.
 
+## AIOStreams health checks
+
+`GET /integrations/health/{provider}` exposes a small, read-only health response without a login. For example:
+
+```sh
+curl -i http://debridup:8080/integrations/health/torbox
+```
+
+A healthy response is HTTP `200` with `{"ok":true,"state":"healthy"}`. HTTP `503` means unhealthy, paused, or unavailable; HTTP `404` means an unknown or unconfigured provider. Provider slugs are `torbox`, `premiumize`, `alldebrid`, `realdebrid`, `torrin`, `pikpak`, `offcloud`, `debridlink`, `easydebrid`, `debrider`, and `deepbrid`.
+
+The endpoint uses confirmed authenticated monitor state, respecting failure and recovery thresholds. A slow successful check remains healthy. Never-checked monitors and results older than two monitor intervals plus one check timeout count as unhealthy. If several enabled monitors use the same provider, all must pass; disabled monitors are ignored unless all are disabled, which returns `503`. Polling reads existing state and never triggers extra provider requests or changes the database. It returns no account names, credentials, error details, or history.
+
+For self-hosted AIOStreams:
+
+1. Make DebridUp reachable from the AIOStreams container, for example by attaching both containers to the same Docker network. `debridup:8080` assumes that service name and DebridUp's default internal port; otherwise use its reachable LAN address and port.
+2. In AIOStreams Settings → User Limits → Health Checks, enable **Allow Private URLs** (`HEALTH_CHECK_ALLOW_PRIVATE_URLS=true`) for your trusted private instance.
+3. In your configuration's Miscellaneous → Health Checks, add ID `torbox-up`, URL `http://debridup:8080/integrations/health/torbox`, method `GET`, expected status `200`, interval `60` seconds, timeout `3000` ms, and failure behavior **down**. Leave JSON path and body matching empty.
+4. Test the check and save the configuration. Use `health('torbox-up')` as a group condition, or `not health('torbox-up')` as a fallback variant's activation condition. A check alone does not change stream selection.
+
+AIOStreams caches results, so switching also depends on its refresh interval. See its [health-check reference](https://docs.aiostreams.viren070.me/reference/config-expressions/#health-checks).
+
+This route intentionally requires no session. Anyone who can reach it can read the provider's availability. Keep it on your private network, or restrict the route at your reverse proxy if DebridUp is publicly reachable. An external login proxy must not intercept the container-to-container request.
+
 ## Security notes
 
 - Provider credentials and ntfy URLs are encrypted with XChaCha20-Poly1305.
