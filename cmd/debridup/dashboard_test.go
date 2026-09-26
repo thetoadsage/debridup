@@ -212,7 +212,7 @@ func TestReportEmptyDatabase(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "No retained checks in this range") || !strings.Contains(rr.Body.String(), "0 retained responses across 0 services") {
+	if !strings.Contains(rr.Body.String(), `"firstCheck": null`) || !strings.Contains(rr.Body.String(), `"responses": 0`) || !strings.Contains(rr.Body.String(), `"incidents": []`) {
 		t.Fatalf("empty report missing coverage or summary: %s", rr.Body.String())
 	}
 }
@@ -247,20 +247,33 @@ func TestReportIsSafeAndUsesAuthenticatedStatistics(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if got := rr.Header().Get("Content-Disposition"); !strings.Contains(got, "attachment") || !strings.Contains(got, ".html") {
+	if got := rr.Header().Get("Content-Disposition"); !strings.Contains(got, "attachment") || !strings.Contains(got, ".json") {
 		t.Fatalf("content-disposition=%q", got)
 	}
-	if got := rr.Header().Get("Content-Security-Policy"); !strings.Contains(got, "style-src 'unsafe-inline'") || !strings.Contains(got, "default-src 'none'") {
-		t.Fatalf("csp=%q", got)
+	if got := rr.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+		t.Fatalf("content-type=%q", got)
 	}
-	body := rr.Body.String()
-	for _, expected := range []string{"&lt;Unsafe &amp; Service&gt;", "Authenticated availability: 50.00% (2 checks)", "Average latency: 102 ms", "maximum latency: 102 ms", "&lt;server_error&gt;"} {
-		if !strings.Contains(body, expected) {
-			t.Errorf("report missing %q", expected)
-		}
+	var report struct {
+		Overall struct {
+			Responses int64 `json:"responses"`
+			AuthenticatedChecks int64 `json:"authenticatedChecks"`
+			AvailabilityPercent float64 `json:"availabilityPercent"`
+			AverageLatencyMS int64 `json:"averageLatencyMs"`
+			MaximumLatencyMS int64 `json:"maximumLatencyMs"`
+		} `json:"overall"`
+		Services []reportService `json:"services"`
 	}
-	if strings.Contains(body, `<Unsafe & Service>`) || strings.Contains(body, `<server_error>`) {
-		t.Fatal("report contains unescaped stored content")
+	if err := json.Unmarshal(rr.Body.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Overall.Responses != 3 || report.Overall.AuthenticatedChecks != 2 || report.Overall.AvailabilityPercent != 50 || report.Overall.AverageLatencyMS != 102 || report.Overall.MaximumLatencyMS != 102 {
+		t.Fatalf("overall=%+v", report.Overall)
+	}
+	if len(report.Services) != 1 || report.Services[0].Name != `<Unsafe & Service>` {
+		t.Fatalf("services=%+v", report.Services)
+	}
+	if strings.Contains(rr.Body.String(), `<tr>`) || strings.Contains(rr.Body.String(), `<server_error>`) {
+		t.Fatal("report still contains raw response history or HTML")
 	}
 }
 

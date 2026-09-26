@@ -9,7 +9,7 @@ Supported providers: TorBox, Premiumize, AllDebrid, Real-Debrid, Torrin, PikPak,
 - Shows whether each provider is up, degraded, slow, or unavailable.
 - Tracks incidents, recoveries, availability, and p50/p95 response times.
 - Displays a graph-based service history for 24 hours, 7 days, or 30 days.
-- Exports readable HTML reports for 1, 7, 30, or 90 days, or all retained history.
+- Exports compact JSON data for 1, 7, 30, or 90 days, or all retained history.
 - Sends incident and recovery notifications through ntfy.
 - Encrypts provider credentials and notification URLs before storing them in SQLite.
 - Runs on AMD64 and ARM64 with Docker Compose or the included Unraid template.
@@ -51,7 +51,7 @@ Use a TLS reverse proxy before making DebridUp available outside a trusted priva
 - **Incidents** lists current and recovered incidents.
 - **Service history** shows availability, status changes, and latency trends.
 - **Settings** manages providers, ntfy notifications, display time zone, and theme.
-- **Report** downloads a self-contained HTML report for the selected period.
+- **Export JSON** downloads service statistics and incident timelines for the selected period. You can give the file to an AI to generate a written report.
 
 The dashboard refreshes every 30 seconds while visible. Raw checks are retained for 90 days by default; incidents remain after their raw samples expire.
 
