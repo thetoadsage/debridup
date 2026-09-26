@@ -255,11 +255,11 @@ func TestReportIsSafeAndUsesAuthenticatedStatistics(t *testing.T) {
 	}
 	var report struct {
 		Overall struct {
-			Responses int64 `json:"responses"`
-			AuthenticatedChecks int64 `json:"authenticatedChecks"`
+			Responses           int64   `json:"responses"`
+			AuthenticatedChecks int64   `json:"authenticatedChecks"`
 			AvailabilityPercent float64 `json:"availabilityPercent"`
-			AverageLatencyMS int64 `json:"averageLatencyMs"`
-			MaximumLatencyMS int64 `json:"maximumLatencyMs"`
+			AverageLatencyMS    int64   `json:"averageLatencyMs"`
+			MaximumLatencyMS    int64   `json:"maximumLatencyMs"`
 		} `json:"overall"`
 		Services []reportService `json:"services"`
 	}
