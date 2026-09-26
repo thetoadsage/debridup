@@ -64,6 +64,9 @@ func refreshRollupBucket(ctx context.Context, db rollupExecutor, monitorID, widt
 			rows.Close()
 			return err
 		}
+		if state == "unknown" {
+			continue
+		}
 		total++
 		if state == stateHealthy {
 			healthy++
@@ -129,7 +132,7 @@ func rebuildRollups(ctx context.Context, db rollupExecutor, monitorID *int64) er
 		       COUNT(*), SUM(CASE WHEN state='healthy' THEN 1 ELSE 0 END),
 		       SUM(CASE WHEN state!='auth_failed' THEN 1 ELSE 0 END), MAX(duration_ms), NULL, NULL
 		FROM check_results
-		WHERE source='authenticated'`
+		WHERE source='authenticated' AND state!='unknown'`
 		args := []any{width, width, width, width}
 		if monitorID != nil {
 			query += ` AND monitor_id=?`

@@ -123,6 +123,9 @@ func dashboardWindow(spec dashboardRange, now time.Time) (firstBucket, lastBucke
 // dashboardDisplayState shows a provider whose latest raw check failed as
 // degraded, even before the failure threshold confirms a state change.
 func dashboardDisplayState(current, lastRaw string) string {
+	if lastRaw == "unknown" {
+		return "unknown"
+	}
 	if current == stateHealthy && lastRaw != "" && lastRaw != stateHealthy {
 		return stateDegraded
 	}
@@ -291,6 +294,9 @@ func (a *app) dashboardSnapshot(ctx context.Context, spec dashboardRange, now ti
 
 	for _, provider := range providers {
 		provider.provider.State = dashboardDisplayState(provider.provider.State, provider.lastRawState)
+		if provider.provider.LastCheck == nil || (!a.startedAt.IsZero() && *provider.provider.LastCheck < a.startedAt.Unix()) {
+			provider.provider.State = "unknown"
+		}
 		if provider.provider.State == stateDegraded && provider.failureStarted != nil {
 			provider.provider.StateSince = provider.failureStarted
 		}
@@ -595,6 +601,9 @@ func (a *app) currentStatus(ctx context.Context, now time.Time) (currentStatusRe
 				rawState = monitorState
 			}
 			p.State = currentDisplayState(rawState, duration, timeout)
+			if lastCheck == 0 || (!a.startedAt.IsZero() && lastCheck < a.startedAt.Unix()) {
+				p.State = "unknown"
+			}
 			if p.ActiveIncident {
 				response.Summary.ActiveIncidents++
 			}
@@ -770,7 +779,7 @@ func (a *app) report(w http.ResponseWriter, r *http.Request) {
 		if err := tx.QueryRowContext(r.Context(), `SELECT MIN(checked_at),MAX(checked_at) FROM check_results WHERE checked_at>=?`, start.Unix()).Scan(&firstCheck, &lastCheck); err != nil {
 			return fmt.Errorf("load report coverage: %w", err)
 		}
-		rows, err := tx.QueryContext(r.Context(), `SELECT m.name,COUNT(*),SUM(CASE WHEN c.source='authenticated' THEN 1 ELSE 0 END),SUM(CASE WHEN c.source='authenticated' AND c.state='healthy' THEN 1 ELSE 0 END),COALESCE(AVG(CASE WHEN c.source='authenticated' THEN c.duration_ms END),0),COALESCE(MAX(CASE WHEN c.source='authenticated' THEN c.duration_ms END),0) FROM check_results c JOIN monitors m ON m.id=c.monitor_id WHERE c.checked_at>=? GROUP BY m.id,m.name ORDER BY m.name`, start.Unix())
+		rows, err := tx.QueryContext(r.Context(), `SELECT m.name,COUNT(*),SUM(CASE WHEN c.source='authenticated' AND c.state!='unknown' THEN 1 ELSE 0 END),SUM(CASE WHEN c.source='authenticated' AND c.state='healthy' THEN 1 ELSE 0 END),COALESCE(AVG(CASE WHEN c.source='authenticated' AND c.state!='unknown' THEN c.duration_ms END),0),COALESCE(MAX(CASE WHEN c.source='authenticated' AND c.state!='unknown' THEN c.duration_ms END),0) FROM check_results c JOIN monitors m ON m.id=c.monitor_id WHERE c.checked_at>=? GROUP BY m.id,m.name ORDER BY m.name`, start.Unix())
 		if err != nil {
 			return fmt.Errorf("load report summaries: %w", err)
 		}
@@ -861,7 +870,7 @@ func (a *app) report(w http.ResponseWriter, r *http.Request) {
 		Services  []reportService  `json:"services"`
 		Incidents []reportIncident `json:"incidents"`
 	}{GeneratedAt: now.Format(time.RFC3339), Range: label, Services: services, Incidents: incidents,
-		Notes: []string{"Availability and latency use authenticated checks only; public checks count toward responses.", "Raw checks are retained for a configured period (90 days by default); incidents may outlive them."}}
+		Notes: []string{"Availability and latency use authenticated checks with known provider outcomes; public and unknown checks count toward responses.", "Raw checks are retained for a configured period (90 days by default); incidents may outlive them."}}
 	payload.Coverage.FirstCheck, payload.Coverage.LastCheck = coverageStart, coverageEnd
 	payload.Overall.Responses, payload.Overall.Services = totalChecks, len(services)
 	payload.Overall.AuthenticatedChecks, payload.Overall.HealthyChecks = authenticatedChecks, healthyChecks

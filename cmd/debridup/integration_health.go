@@ -21,7 +21,7 @@ func (a *app) providerHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := a.db.QueryContext(r.Context(), `SELECT m.enabled,m.interval_seconds,m.timeout_seconds,
-		COALESCE(s.current_state,''),COALESCE(s.last_check_at,0)
+		COALESCE(s.current_state,''),COALESCE(s.last_raw_state,''),COALESCE(s.last_check_at,0)
 		FROM monitors m LEFT JOIN monitor_states s ON s.monitor_id=m.id WHERE m.provider=?`, provider)
 	if err != nil {
 		respond(http.StatusServiceUnavailable, "unavailable")
@@ -29,12 +29,12 @@ func (a *app) providerHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	now := time.Now().Unix()
-	found, enabled, up := false, false, true
+	found, enabled, up, unknown := false, false, true, false
 	for rows.Next() {
 		var active bool
 		var interval, timeout, checked int64
-		var state string
-		if err := rows.Scan(&active, &interval, &timeout, &state, &checked); err != nil {
+		var state, raw string
+		if err := rows.Scan(&active, &interval, &timeout, &state, &raw, &checked); err != nil {
 			respond(http.StatusServiceUnavailable, "unavailable")
 			return
 		}
@@ -45,7 +45,10 @@ func (a *app) providerHealth(w http.ResponseWriter, r *http.Request) {
 		enabled = true
 		// Allow two polling intervals plus a probe timeout before calling data stale.
 		// Newly created/reset monitors default to healthy but have no check timestamp.
-		if state != stateHealthy || checked <= 0 || checked > now || now-checked > 2*interval+timeout {
+		if checked <= 0 || checked > now || now-checked > 2*interval+timeout || (!a.startedAt.IsZero() && checked < a.startedAt.Unix()) || raw == "unknown" {
+			unknown = true
+			up = false
+		} else if state != stateHealthy {
 			up = false
 		}
 	}
@@ -55,6 +58,8 @@ func (a *app) providerHealth(w http.ResponseWriter, r *http.Request) {
 		respond(http.StatusNotFound, "not_found")
 	} else if !enabled {
 		respond(http.StatusServiceUnavailable, "paused")
+	} else if unknown {
+		respond(http.StatusServiceUnavailable, "unknown")
 	} else if !up {
 		respond(http.StatusServiceUnavailable, "unhealthy")
 	} else {

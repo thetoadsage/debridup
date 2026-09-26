@@ -169,7 +169,7 @@ func (a *app) runMonitor(m monitor) {
 		a.logger.Error("load monitor secret", "monitor", m.ID, "error", err)
 		return
 	}
-	result := a.authCheck(m, secret)
+	result := a.classifyConnectivity(a.authCheck(m, secret))
 	if _, err = a.recordResult(m, "authenticated", result); err != nil {
 		a.logger.Error("record check", "monitor", m.ID, "error", err)
 	}

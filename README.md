@@ -16,6 +16,8 @@ Supported providers: TorBox, Premiumize, AllDebrid, Real-Debrid, Torrin, PikPak,
 
 Authenticated checks use read-only account or history endpoints. PikPak requires a compatible access token, which may need to be replaced when it expires.
 
+When a provider connection fails, DebridUp makes short requests to Cloudflare and Google connectivity endpoints. If neither hostname responds, it also checks `https://1.1.1.1/help` without DNS. A working IP check suggests DNS or the hostname controls may be failing; if it fails too, local connectivity is uncertain. Either way, the provider result is **unknown**: it remains in the raw check log but does not advance an incident or count against provider availability. After DebridUp restarts, providers remain unknown until a fresh check completes. These control requests reveal the monitor's public IP to their operators.
+
 ## Docker quick start
 
 1. Copy the example environment file and set an admin password of at least 12 characters:
@@ -98,9 +100,9 @@ For a live database, use SQLite's online backup mechanism instead of copying onl
 curl -i http://debridup:8080/integrations/health/torbox
 ```
 
-A healthy response is HTTP `200` with `{"ok":true,"state":"healthy"}`. HTTP `503` means unhealthy, paused, or unavailable; HTTP `404` means an unknown or unconfigured provider. Provider slugs are `torbox`, `premiumize`, `alldebrid`, `realdebrid`, `torrin`, `pikpak`, `offcloud`, `debridlink`, `easydebrid`, `debrider`, and `deepbrid`.
+A healthy response is HTTP `200` with `{"ok":true,"state":"healthy"}`. HTTP `503` returns `unhealthy`, `unknown`, `paused`, or `unavailable`; `unknown` covers local connectivity uncertainty and checks that are stale or predate a restart. Consumers that only inspect the HTTP status still fail closed during uncertainty. HTTP `404` means an unknown or unconfigured provider. Provider slugs are `torbox`, `premiumize`, `alldebrid`, `realdebrid`, `torrin`, `pikpak`, `offcloud`, `debridlink`, `easydebrid`, `debrider`, and `deepbrid`.
 
-The endpoint uses confirmed authenticated monitor state, respecting failure and recovery thresholds. A slow successful check remains healthy. Never-checked monitors and results older than two monitor intervals plus one check timeout count as unhealthy. If several enabled monitors use the same provider, all must pass; disabled monitors are ignored unless all are disabled, which returns `503`. Polling reads existing state and never triggers extra provider requests or changes the database. It returns no account names, credentials, error details, or history.
+The endpoint uses confirmed authenticated monitor state, respecting failure and recovery thresholds. A slow successful check remains healthy. Never-checked monitors and results older than two monitor intervals plus one check timeout count as unknown. If several enabled monitors use the same provider, all must pass; disabled monitors are ignored unless all are disabled, which returns `503`. Polling reads existing state and never triggers extra provider requests or changes the database. It returns no account names, credentials, error details, or history.
 
 For self-hosted AIOStreams:
 

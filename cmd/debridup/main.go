@@ -48,14 +48,17 @@ const (
 var errInvalidEncryptionKey = errors.New("invalid encryption key")
 
 type app struct {
-	db        *sql.DB
-	key       []byte
-	client    *http.Client
-	logger    *slog.Logger
-	runs      *runCoordinator
-	cookieKey []byte
-	sessions  *sessionStore
-	logins    *loginLimiter
+	db                *sql.DB
+	key               []byte
+	client            *http.Client
+	startedAt         time.Time
+	connectivityURLs  []string
+	connectivityIPURL string
+	logger            *slog.Logger
+	runs              *runCoordinator
+	cookieKey         []byte
+	sessions          *sessionStore
+	logins            *loginLimiter
 
 	// The master key is fixed for the process lifetime, so the AEAD is built
 	// once instead of on every encrypt/decrypt.
@@ -177,7 +180,7 @@ func run() error {
 	defer db.Close()
 
 	cookieHash := sha256.Sum256(key)
-	a := &app{db: db, key: key, cookieKey: cookieHash[:], client: &http.Client{Timeout: 65 * time.Second}, logger: slog.Default(), runs: newRunCoordinator(maxConcurrentChecks)}
+	a := &app{db: db, key: key, cookieKey: cookieHash[:], client: &http.Client{Timeout: 65 * time.Second}, logger: slog.Default(), runs: newRunCoordinator(maxConcurrentChecks), startedAt: time.Now()}
 	if err := migrateDatabase(context.Background(), db); err != nil {
 		return fmt.Errorf("apply database migrations: %w", err)
 	}
@@ -902,7 +905,14 @@ func (a *app) recordResult(m monitor, source string, r checkResult) (int64, erro
 	var eventType string
 	var incidentID int64
 	previous := ms.Current
-	if r.State == stateHealthy {
+	if r.State == "unknown" {
+		// A failed local connectivity control cannot establish provider health.
+		// Break the failure streak without opening or resolving an incident.
+		ms.FailureStreak = 0
+		ms.FailureStartedAt = 0
+		ms.RecoveryStreak = 0
+		ms.LastRaw = "unknown"
+	} else if r.State == stateHealthy {
 		ms.FailureStreak = 0
 		ms.FailureStartedAt = 0
 		ms.LastRaw = stateHealthy
@@ -1455,7 +1465,7 @@ func (a *app) testMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer a.runs.Release(m.ID)
-	result := a.authCheck(m, key)
+	result := a.classifyConnectivity(a.authCheck(m, key))
 	_, err = a.recordResult(m, "authenticated", result)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "could not record check"})
@@ -1602,7 +1612,7 @@ func (a *app) overview(w http.ResponseWriter, r *http.Request) {
 		}
 		var partialTotal, partialEligible int
 		if err = a.db.QueryRowContext(ctx, `SELECT COUNT(*),COUNT(CASE WHEN state!='auth_failed' THEN 1 END)
-		FROM check_results WHERE monitor_id=? AND source='authenticated' AND checked_at>=? AND checked_at<?`,
+		FROM check_results WHERE monitor_id=? AND source='authenticated' AND state!='unknown' AND checked_at>=? AND checked_at<?`,
 			id, cutoff, boundary+coverageBucketWidth).Scan(&partialTotal, &partialEligible); err != nil {
 			fail()
 			return

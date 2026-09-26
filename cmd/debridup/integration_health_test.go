@@ -17,12 +17,13 @@ func TestProviderHealth(t *testing.T) {
 		{"pending failure", stateHealthy, stateAPI, "torbox", `{"ok":true,"state":"healthy"}` + "\n", 1, 0, 200},
 		{"pending recovery", stateAPI, stateHealthy, "torbox", `{"ok":false,"state":"unhealthy"}` + "\n", 1, 0, 503},
 		{"auth failure", stateAuthFailed, stateAuthFailed, "torbox", `{"ok":false,"state":"unhealthy"}` + "\n", 1, 0, 503},
-		{"stale", stateHealthy, stateHealthy, "torbox", `{"ok":false,"state":"unhealthy"}` + "\n", 1, 136, 503},
-		{"future", stateHealthy, stateHealthy, "torbox", `{"ok":false,"state":"unhealthy"}` + "\n", 1, -60, 503},
+		{"stale", stateHealthy, stateHealthy, "torbox", `{"ok":false,"state":"unknown"}` + "\n", 1, 136, 503},
+		{"future", stateHealthy, stateHealthy, "torbox", `{"ok":false,"state":"unknown"}` + "\n", 1, -60, 503},
+		{"local outage", stateHealthy, "unknown", "torbox", `{"ok":false,"state":"unknown"}` + "\n", 1, 0, 503},
 		{"paused", stateHealthy, stateHealthy, "torbox", `{"ok":false,"state":"paused"}` + "\n", 0, 0, 503},
 		{"unconfigured", stateHealthy, stateHealthy, "premiumize", `{"ok":false,"state":"not_found"}` + "\n", 1, 0, 404},
 		{"unsupported", stateHealthy, stateHealthy, "invalid", `{"ok":false,"state":"not_found"}` + "\n", 1, 0, 404},
-		{"never checked", stateHealthy, stateHealthy, "torbox", `{"ok":false,"state":"unhealthy"}` + "\n", 1, -1, 503},
+		{"never checked", stateHealthy, stateHealthy, "torbox", `{"ok":false,"state":"unknown"}` + "\n", 1, -1, 503},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := testApp(t)
@@ -83,4 +84,32 @@ func TestProviderHealthMultipleMonitorsAndUnavailableDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(503)
+}
+
+func TestProviderHealthAfterRestartRequiresFreshCheck(t *testing.T) {
+	a := testApp(t)
+	if err := migrateDatabase(context.Background(), a.db); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	if _, err := a.db.Exec(`INSERT INTO monitors(id,provider,name,created_at,updated_at) VALUES(1,'torbox','private',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`INSERT INTO monitor_states(monitor_id,current_state,state_since,last_raw_state,last_check_at) VALUES(1,'healthy',?,'healthy',?)`, now-1, now-1); err != nil {
+		t.Fatal(err)
+	}
+	a.startedAt = time.Unix(now, 0)
+	check := func(want string) {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		a.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/integrations/health/torbox", nil))
+		if rr.Body.String() != want {
+			t.Fatalf("got %s, want %s", rr.Body.String(), want)
+		}
+	}
+	check("{\"ok\":false,\"state\":\"unknown\"}\n")
+	if _, err := a.db.Exec(`UPDATE monitor_states SET last_check_at=? WHERE monitor_id=1`, now); err != nil {
+		t.Fatal(err)
+	}
+	check("{\"ok\":true,\"state\":\"healthy\"}\n")
 }
