@@ -18,6 +18,10 @@
   --status-danger-bg: #3b2930;
   --status-unknown: #a9c1db;
   --status-unknown-bg: #263344;
+  --timeline-clear: #1e503d;
+  --timeline-incident: #ff94a0;
+  --timeline-empty: #aebdc7;
+  --timeline-failed: #ffe083;
   --green: var(--status-healthy);
   --amber: var(--status-warning);
   --red: var(--status-danger);
@@ -67,6 +71,10 @@
   --status-danger-bg: #381426;
   --status-unknown: #aab8ff;
   --status-unknown-bg: #1a203d;
+  --timeline-clear: #17514b;
+  --timeline-incident: #ff8db8;
+  --timeline-empty: #beb6da;
+  --timeline-failed: #ffe17d;
 }
 
 :root[data-theme="sakura"] {
@@ -97,6 +105,10 @@
   --status-danger-bg: #fae2e9;
   --status-unknown: #6179a8;
   --status-unknown-bg: #e8edf8;
+  --timeline-clear: #90c8b0;
+  --timeline-incident: #9e2348;
+  --timeline-empty: #5c586e;
+  --timeline-failed: #804500;
 }
 
 :root[data-theme="terminal"] {
@@ -125,6 +137,10 @@
   --status-danger-bg: #321815;
   --status-unknown: #98bca2;
   --status-unknown-bg: #14231a;
+  --timeline-clear: #20512d;
+  --timeline-incident: #ff9a90;
+  --timeline-empty: #b3c2b5;
+  --timeline-failed: #ffe07b;
   --font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   --radius: 5px;
   --control-radius: 3px;
@@ -272,28 +288,28 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .history-metrics span { display: block; overflow: hidden; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
 .history-metrics strong { display: block; margin-top: 4px; overflow: hidden; font-size: 17px; text-overflow: ellipsis; white-space: nowrap; }
 .history-status-block { margin-top: 16px; }
-.history-status-heading { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 7px; color: var(--muted); font-size: 11px; }
-.history-status-heading strong { color: var(--text); font-size: 12px; }
-.history-status-track { display: block; width: 100%; height: 22px; overflow: hidden; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-inset); }
+.history-status-heading { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 7px; color: var(--muted); font-size: 12px; }
+.history-status-heading strong { color: var(--text); font-size: 13px; }
+.history-status-track { display: block; width: 100%; height: 26px; overflow: hidden; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-inset); }
 .history-status-segment { stroke: none; }
-.history-status-segment.healthy { fill: var(--status-healthy); }
-.history-status-segment.outage { fill: var(--status-danger); }
-.history-status-segment.unknown { fill: var(--status-unknown); }
+.history-status-segment.healthy { fill: var(--timeline-clear); }
+.history-status-segment.outage { fill: var(--timeline-incident); }
+.history-status-segment.unknown { fill: var(--timeline-empty); }
 .history-status-hit { fill: transparent; cursor: pointer; }
 .history-status-hit:focus { fill: none; stroke: var(--text); stroke-width: 2px; vector-effect: non-scaling-stroke; outline: none; }
-.history-status-failed-mark { stroke: var(--status-warning); stroke-width: 3px; vector-effect: non-scaling-stroke; pointer-events: none; }
-.history-status-times { display: flex; justify-content: space-between; gap: 8px; margin-top: 5px; color: var(--muted); font-size: 10px; }
+.history-status-failed-mark { stroke: var(--timeline-failed); stroke-width: 4px; vector-effect: non-scaling-stroke; pointer-events: none; }
+.history-status-times { display: flex; justify-content: space-between; gap: 8px; margin-top: 5px; color: var(--muted); font-size: 11px; }
 .history-status-times time { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .history-status-times time:nth-child(2) { text-align: center; }
 .history-status-times time:last-child { text-align: right; }
-.history-status-legend { display: flex; flex-wrap: wrap; gap: 13px; margin-top: 9px; color: var(--muted); font-size: 10px; }
+.history-status-legend { display: flex; flex-wrap: wrap; gap: 13px; margin-top: 9px; color: var(--muted); font-size: 12px; }
 .history-status-legend span { display: inline-flex; align-items: center; gap: 5px; }
-.history-status-swatch { width: 10px; height: 10px; border-radius: 2px; }
-.history-status-swatch.healthy { background: var(--status-healthy); }
-.history-status-swatch.failed { width: 3px; background: var(--status-warning); }
-.history-status-swatch.outage { background: var(--status-danger); }
-.history-status-swatch.unknown { background: var(--status-unknown); }
-.history-status-detail { margin: 7px 0 0; color: var(--muted); font-size: 11px; }
+.history-status-swatch { width: 12px; height: 12px; border-radius: 2px; }
+.history-status-swatch.healthy { background: var(--timeline-clear); }
+.history-status-swatch.failed { width: 4px; background: var(--timeline-failed); }
+.history-status-swatch.outage { background: var(--timeline-incident); }
+.history-status-swatch.unknown { background: var(--timeline-empty); }
+.history-status-detail { margin: 7px 0 0; color: var(--text); font-size: 12px; }
 .history-status-empty { margin-top: 16px; padding: 10px; border: 1px dashed var(--border); color: var(--muted); font-size: 12px; text-align: center; }
 .chart-legend { display: flex; flex-wrap: wrap; gap: 12px; margin: 17px 0 6px; color: var(--muted); font-size: 11px; }
 .chart-legend span { display: inline-flex; align-items: center; gap: 5px; }

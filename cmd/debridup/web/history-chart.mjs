@@ -120,7 +120,7 @@ function statusTimeline(series, providerName, timeZone) {
     const detail = escapeHTML(bucketDetail(point, point.bucketStart + width, timeZone));
     return `<rect class="history-status-hit" x="${index}" y="0" width="1" height="1" tabindex="0" data-history-detail="${detail}" aria-label="${detail}"><title>${detail}</title></rect>`;
   }).join('');
-  const marks = points.map((point, index) => (Number(point.totalChecks) || 0) > (Number(point.healthyChecks) || 0)
+  const marks = points.map((point, index) => point.state !== 'outage' && (Number(point.totalChecks) || 0) > (Number(point.healthyChecks) || 0)
     ? `<line class="history-status-failed-mark" x1="${index + .5}" x2="${index + .5}" y1=".15" y2=".85"></line>` : '').join('');
   const anchors = [points[0], points[Math.floor((points.length - 1) / 2)], points[points.length - 1]];
   const timeAnchors = anchors.map(point => `<time datetime="${escapeHTML(new Date(point.bucketStart * 1000).toISOString())}">${escapeHTML(formatTimestamp(point.bucketStart, timeZone))}</time>`).filter((value, index, values) => values.indexOf(value) === index).join('');

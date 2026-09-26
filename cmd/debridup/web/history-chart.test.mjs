@@ -52,13 +52,14 @@ test('status timeline groups adjacent states into proportional semantic runs', (
   const html = historyMarkup({providers: [{id: 5, name: 'Provider', state: 'healthy', series: [
     {bucketStart: 1, state: 'healthy', totalChecks: 2, healthyChecks: 2},
     {bucketStart: 2, state: 'healthy', totalChecks: 2, healthyChecks: 1},
-    {bucketStart: 3, state: 'outage'}, {bucketStart: 4, state: 'unknown'},
+    {bucketStart: 3, state: 'outage', totalChecks: 2, healthyChecks: 0}, {bucketStart: 4, state: 'unknown'},
   ]}]}, 5, 'UTC');
   assert.equal((html.match(/history-status-segment /g) || []).length, 3);
   assert.match(html, /class="history-status-segment healthy" x="0" y="0" width="2"/);
   assert.match(html, /class="history-status-segment outage" x="2" y="0" width="1"/);
   assert.match(html, /history-status-swatch outage/);
   assert.match(html, /class="history-status-failed-mark" x1="1\.5"/);
+  assert.equal((html.match(/history-status-failed-mark/g) || []).length, 1);
   assert.match(html, /Authenticated checks: 1 failed, 1 successful\. No confirmed incident\./);
   assert.match(html, /Confirmed incident\./);
   assert.doesNotMatch(html, /history-status-segment degraded/);
