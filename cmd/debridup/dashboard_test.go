@@ -768,7 +768,7 @@ func TestSeriesFromRollupsClassifiesBucketState(t *testing.T) {
 	if len(series) != 5 {
 		t.Fatalf("series length = %d, want 5", len(series))
 	}
-	want := []string{"healthy", "degraded", "outage", "unknown", "unknown"}
+	want := []string{"healthy", "healthy", "healthy", "unknown", "unknown"}
 	for i, state := range want {
 		if series[i].State != state {
 			t.Fatalf("bucket %d state = %q, want %q", i, series[i].State, state)
@@ -778,7 +778,10 @@ func TestSeriesFromRollupsClassifiesBucketState(t *testing.T) {
 		}
 	}
 	if series[1].Availability == nil || *series[1].Availability != 50 {
-		t.Fatalf("degraded availability = %v, want 50", series[1].Availability)
+		t.Fatalf("mixed-check availability = %v, want 50", series[1].Availability)
+	}
+	if series[1].TotalChecks != 2 || series[1].HealthyChecks != 1 || series[2].TotalChecks != 2 || series[2].HealthyChecks != 0 {
+		t.Fatalf("check counts missing from series: %#v", series)
 	}
 	// A bucket with no checks carries no metrics and is not counted as downtime.
 	if series[3].Availability != nil || series[3].P50MS != nil || series[3].P95MS != nil {

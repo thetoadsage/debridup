@@ -43,19 +43,25 @@ test('history markup has accessible selector, readable status timeline, and matc
   assert.match(html, /Status timeline/);
   assert.match(html, /&lt;Provider&gt;/);
   assert.match(html, /history-status-swatch healthy/);
+  assert.match(html, /Failed checks/);
   assert.match(html, /history-status-times/);
   assert.doesNotMatch(html, /style=/);
 });
 
 test('status timeline groups adjacent states into proportional semantic runs', () => {
   const html = historyMarkup({providers: [{id: 5, name: 'Provider', state: 'healthy', series: [
-    {bucketStart: 1, state: 'healthy'}, {bucketStart: 2, state: 'healthy'},
+    {bucketStart: 1, state: 'healthy', totalChecks: 2, healthyChecks: 2},
+    {bucketStart: 2, state: 'healthy', totalChecks: 2, healthyChecks: 1},
     {bucketStart: 3, state: 'outage'}, {bucketStart: 4, state: 'unknown'},
   ]}]}, 5, 'UTC');
   assert.equal((html.match(/history-status-segment /g) || []).length, 3);
   assert.match(html, /class="history-status-segment healthy" x="0" y="0" width="2"/);
   assert.match(html, /class="history-status-segment outage" x="2" y="0" width="1"/);
   assert.match(html, /history-status-swatch outage/);
+  assert.match(html, /class="history-status-failed-mark" x1="1\.5"/);
+  assert.match(html, /Authenticated checks: 1 failed, 1 successful\. No confirmed incident\./);
+  assert.match(html, /Confirmed incident\./);
+  assert.doesNotMatch(html, /history-status-segment degraded/);
 });
 
 test('history falls back to the first provider when a selected provider disappears', () => {
@@ -109,4 +115,22 @@ test('all-services selection survives a history refresh', async () => {
   assert.match(root.innerHTML, /data-history-provider="all" aria-pressed="true"/);
   await history.refresh();
   assert.match(root.innerHTML, /data-history-provider="all" aria-pressed="true"/);
+});
+
+test('timeline bucket details work for pointer, keyboard, and click', async () => {
+  const handlers = new Map();
+  const detail = {textContent: ''};
+  const root = {innerHTML: '', setAttribute() {}, querySelector: selector => selector === '.history-status-detail' ? detail : null,
+    addEventListener(type, handler) { handlers.set(type, handler); }};
+  const range = {value: '24h', disabled: false, addEventListener() {}};
+  const document = {getElementById(id) { return {"history-content": root, "history-range": range}[id]; }};
+  startServiceHistory({api: async () => ({providers: [{id: 1, name: 'Provider', series: [{bucketStart: 1, state: 'healthy', totalChecks: 2, healthyChecks: 1}]}]}), document, timeZone: 'UTC'});
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const bucket = {dataset: {historyDetail: 'Authenticated checks: 1 failed, 1 successful.'}};
+  const event = {target: {closest: selector => selector === '[data-history-detail]' ? bucket : null}};
+  for (const type of ['mouseover', 'focusin', 'click']) {
+    detail.textContent = '';
+    handlers.get(type)(event);
+    assert.equal(detail.textContent, bucket.dataset.historyDetail);
+  }
 });

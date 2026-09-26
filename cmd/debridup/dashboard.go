@@ -52,11 +52,13 @@ type dashboardProvider struct {
 }
 
 type dashboardPoint struct {
-	BucketStart  int64    `json:"bucketStart"`
-	State        string   `json:"state"`
-	Availability *float64 `json:"availability"`
-	P50MS        *int64   `json:"p50Ms"`
-	P95MS        *int64   `json:"p95Ms"`
+	BucketStart   int64    `json:"bucketStart"`
+	State         string   `json:"state"`
+	TotalChecks   int64    `json:"totalChecks"`
+	HealthyChecks int64    `json:"healthyChecks"`
+	Availability  *float64 `json:"availability"`
+	P50MS         *int64   `json:"p50Ms"`
+	P95MS         *int64   `json:"p95Ms"`
 }
 
 type dashboardIncident struct {
@@ -369,14 +371,9 @@ func seriesFromRollups(points []rollupPoint, firstBucket, lastBucket, width int6
 	for bucket := firstBucket; bucket <= lastBucket; bucket += width {
 		point := dashboardPoint{BucketStart: bucket, State: "unknown"}
 		if summary, present := stored[bucket]; present && summary.Total > 0 {
-			switch {
-			case summary.Healthy == summary.Total:
-				point.State = "healthy"
-			case summary.Healthy == 0:
-				point.State = "outage"
-			default:
-				point.State = "degraded"
-			}
+			point.State = "healthy"
+			point.TotalChecks = summary.Total
+			point.HealthyChecks = summary.Healthy
 			availability := float64(summary.Healthy) / float64(summary.Total) * 100
 			point.Availability = &availability
 			point.P50MS = summary.P50MS

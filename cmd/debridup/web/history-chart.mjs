@@ -79,21 +79,30 @@ function compareButton(providerCount, selected) {
 }
 
 function timelineState(value) {
-  if (value === 'healthy') return 'healthy';
-  if (value === 'degraded' || value === 'slow') return 'degraded';
-  if (value === 'outage' || value === 'auth_failed' || value === 'api_issue' || value === 'connection_issue') return 'outage';
-  return 'unknown';
+  return value === 'outage' ? 'outage' : value === 'unknown' ? 'unknown' : 'healthy';
+}
+
+function bucketDetail(point, nextStart, timeZone) {
+  const start = formatTimestamp(point.bucketStart, timeZone);
+  const end = formatTimestamp(nextStart, timeZone);
+  const total = Number(point.totalChecks) || 0;
+  const healthy = Number(point.healthyChecks) || 0;
+  const failed = Math.max(0, total - healthy);
+  const checks = total ? `Authenticated checks: ${failed} failed, ${healthy} successful.` : 'No authenticated checks recorded.';
+  const incident = point.state === 'outage' ? 'Confirmed incident.' : 'No confirmed incident.';
+  return `${start} to ${end}: ${checks} ${incident}`;
 }
 
 function statusTimeline(series, providerName, timeZone) {
   const points = validPoints(series);
   if (!points.length) return '<div class="history-status-empty">No status buckets in this period.</div>';
+  const width = points.length > 1 ? points[1].bucketStart - points[0].bucketStart : 900;
   const counts = new Map();
   for (const point of points) {
     const state = timelineState(point.state);
     counts.set(state, (counts.get(state) || 0) + 1);
   }
-  const description = [...counts.entries()].map(([state, count]) => `${count} ${stateLabel(state).toLowerCase()}`).join(', ');
+  const description = [...counts.entries()].map(([state, count]) => `${count} ${state === 'healthy' ? 'without confirmed incident' : state === 'outage' ? 'with confirmed incident' : 'without check data'}`).join(', ');
   const runs = [];
   for (const point of points) {
     const state = timelineState(point.state);
@@ -103,17 +112,20 @@ function statusTimeline(series, providerName, timeZone) {
   }
   let offset = 0;
   const segments = runs.map(run => {
-    const start = run.points[0].bucketStart;
-    const end = run.points[run.points.length - 1].bucketStart;
-    const title = `${stateLabel(run.state)} — ${formatTimestamp(start, timeZone)}${run.points.length > 1 ? ` to ${formatTimestamp(end, timeZone)}` : ''}`;
-    const segment = `<rect class="history-status-segment ${run.state}" x="${offset}" y="0" width="${run.points.length}" height="1"><title>${escapeHTML(title)}</title></rect>`;
+    const segment = `<rect class="history-status-segment ${run.state}" x="${offset}" y="0" width="${run.points.length}" height="1"></rect>`;
     offset += run.points.length;
     return segment;
   }).join('');
+  const buckets = points.map((point, index) => {
+    const detail = escapeHTML(bucketDetail(point, point.bucketStart + width, timeZone));
+    return `<rect class="history-status-hit" x="${index}" y="0" width="1" height="1" tabindex="0" data-history-detail="${detail}" aria-label="${detail}"><title>${detail}</title></rect>`;
+  }).join('');
+  const marks = points.map((point, index) => (Number(point.totalChecks) || 0) > (Number(point.healthyChecks) || 0)
+    ? `<line class="history-status-failed-mark" x1="${index + .5}" x2="${index + .5}" y1=".15" y2=".85"></line>` : '').join('');
   const anchors = [points[0], points[Math.floor((points.length - 1) / 2)], points[points.length - 1]];
-  const timeAnchors = anchors.map((point, index) => `<time datetime="${escapeHTML(new Date(point.bucketStart * 1000).toISOString())}">${escapeHTML(formatTimestamp(point.bucketStart, timeZone))}</time>`).filter((value, index, values) => values.indexOf(value) === index).join('');
-  const legend = ['healthy', 'degraded', 'outage', 'unknown'].map(state => `<span><i class="history-status-swatch ${state}" aria-hidden="true"></i>${stateLabel(state)}</span>`).join('');
-  return `<div class="history-status-block"><div class="history-status-heading"><strong>Status timeline</strong><span>${escapeHTML(description)}</span></div><svg class="history-status-track" viewBox="0 0 ${points.length} 1" preserveAspectRatio="none" role="img" aria-label="${escapeHTML(`${providerName} status timeline: ${description}`)}">${segments}</svg><div class="history-status-times">${timeAnchors}</div><div class="history-status-legend" aria-hidden="true">${legend}</div></div>`;
+  const timeAnchors = anchors.map(point => `<time datetime="${escapeHTML(new Date(point.bucketStart * 1000).toISOString())}">${escapeHTML(formatTimestamp(point.bucketStart, timeZone))}</time>`).filter((value, index, values) => values.indexOf(value) === index).join('');
+  const legend = [['healthy', 'No confirmed incident'], ['outage', 'Confirmed incident'], ['unknown', 'No check data'], ['failed', 'Failed checks']].map(([state, label]) => `<span><i class="history-status-swatch ${state}" aria-hidden="true"></i>${label}</span>`).join('');
+  return `<div class="history-status-block"><div class="history-status-heading"><strong>Status timeline</strong><span>${escapeHTML(description)}</span></div><svg class="history-status-track" viewBox="0 0 ${points.length} 1" preserveAspectRatio="none" role="group" aria-label="${escapeHTML(`${providerName} status timeline. Select a time bucket for check counts.`)}">${segments}${buckets}${marks}</svg><div class="history-status-times">${timeAnchors}</div><div class="history-status-legend" aria-label="Timeline legend">${legend}</div><p class="history-status-detail" role="status">Select a time bucket to see authenticated check counts.</p></div>`;
 }
 
 export function historyMarkup(data, selectedID, timeZone) {
@@ -128,7 +140,7 @@ export function historyMarkup(data, selectedID, timeZone) {
     return `<div class="history-layout"><section class="history-provider-list" aria-label="Providers">${buttons}</section><div class="history-detail"><div class="chart-legend comparison-legend" aria-label="Service comparison chart legend">${legend}<span>p50 response time · All times shown in ${escapeHTML(timeZone === 'browser' ? 'your browser time' : timeZone)}</span></div>${comparisonChartMarkup(providers, timeZone)}<div class="table-scroll comparison-summary-scroll" tabindex="0" aria-label="Scrollable service comparison table"><table class="provider-table comparison-summary-table"><caption>Service history comparison</caption><thead><tr><th scope="col">Service</th><th scope="col">Current state</th><th scope="col">Availability</th><th scope="col">p50</th><th scope="col">p95</th><th scope="col">Slowest</th></tr></thead><tbody>${rows}</tbody></table></div></div></div>`;
   }
   const availability = Number.isFinite(selected.availability) ? `${selected.availability.toFixed(1)}%` : '—';
-  return `<div class="history-layout"><section class="history-provider-list" aria-label="Providers">${buttons}</section><div class="history-detail"><div class="history-metrics" aria-label="${escapeHTML(selected.name)} summary"><div><span>Availability</span><strong>${availability}</strong></div><div><span>p50 latency</span><strong>${escapeHTML(formatLatency(selected.p50Ms))}</strong></div><div><span>p95 latency</span><strong>${escapeHTML(formatLatency(selected.p95Ms))}</strong></div><div><span>Slowest</span><strong>${escapeHTML(formatLatency(selected.slowestMs))}</strong></div><div><span>Current state</span><strong>${escapeHTML(stateLabel(selected.state))}</strong></div></div>${statusTimeline(selected.series, selected.name || 'Selected provider', timeZone)}<div class="chart-legend" aria-label="Latency chart legend"><span><i class="legend-line p50" aria-hidden="true"></i>p50 response time</span><span><i class="legend-line p95" aria-hidden="true"></i>p95 response time</span><span>All times shown in ${escapeHTML(timeZone === 'browser' ? 'your browser time' : timeZone)}</span></div>${chartMarkup(selected, timeZone)}<details class="history-text-summary"><summary>Accessible data summary</summary><p>${escapeHTML(selected.name)} is currently ${escapeHTML(stateLabel(selected.state))}. Availability is ${availability}; p50 is ${escapeHTML(formatLatency(selected.p50Ms))}; p95 is ${escapeHTML(formatLatency(selected.p95Ms))}.</p><div class="table-scroll"><table class="provider-table history-summary-table"><caption>Bucketed service history for ${escapeHTML(selected.name)}</caption><thead><tr><th scope="col">Time</th><th scope="col">State</th><th scope="col">Availability</th><th scope="col">p50</th><th scope="col">p95</th></tr></thead><tbody>${validPoints(selected.series).map(point => `<tr><th scope="row">${escapeHTML(formatTimestamp(point.bucketStart, timeZone))}</th><td><span class="state ${stateClass(point.state)}">${escapeHTML(stateLabel(point.state))}</span></td><td>${Number.isFinite(point.availability) ? `${point.availability.toFixed(1)}%` : '—'}</td><td>${escapeHTML(formatLatency(point.p50Ms))}</td><td>${escapeHTML(formatLatency(point.p95Ms))}</td></tr>`).join('')}</tbody></table></div></details></div></div>`;
+  return `<div class="history-layout"><section class="history-provider-list" aria-label="Providers">${buttons}</section><div class="history-detail"><div class="history-metrics" aria-label="${escapeHTML(selected.name)} summary"><div><span>Availability</span><strong>${availability}</strong></div><div><span>p50 latency</span><strong>${escapeHTML(formatLatency(selected.p50Ms))}</strong></div><div><span>p95 latency</span><strong>${escapeHTML(formatLatency(selected.p95Ms))}</strong></div><div><span>Slowest</span><strong>${escapeHTML(formatLatency(selected.slowestMs))}</strong></div><div><span>Current state</span><strong>${escapeHTML(stateLabel(selected.state))}</strong></div></div>${statusTimeline(selected.series, selected.name || 'Selected provider', timeZone)}<div class="chart-legend" aria-label="Latency chart legend"><span><i class="legend-line p50" aria-hidden="true"></i>p50 response time</span><span><i class="legend-line p95" aria-hidden="true"></i>p95 response time</span><span>All times shown in ${escapeHTML(timeZone === 'browser' ? 'your browser time' : timeZone)}</span></div>${chartMarkup(selected, timeZone)}<details class="history-text-summary"><summary>Accessible data summary</summary><p>${escapeHTML(selected.name)} is currently ${escapeHTML(stateLabel(selected.state))}. Availability is ${availability}; p50 is ${escapeHTML(formatLatency(selected.p50Ms))}; p95 is ${escapeHTML(formatLatency(selected.p95Ms))}.</p><div class="table-scroll"><table class="provider-table history-summary-table"><caption>Bucketed service history for ${escapeHTML(selected.name)}</caption><thead><tr><th scope="col">Time</th><th scope="col">Incident status</th><th scope="col">Authenticated checks</th><th scope="col">Availability</th><th scope="col">p50</th><th scope="col">p95</th></tr></thead><tbody>${validPoints(selected.series).map(point => `<tr><th scope="row">${escapeHTML(formatTimestamp(point.bucketStart, timeZone))}</th><td><span class="state ${stateClass(timelineState(point.state))}">${escapeHTML(point.state === 'outage' ? 'Confirmed incident' : point.state === 'unknown' ? 'No check data' : 'No confirmed incident')}</span></td><td>${Number(point.totalChecks) || 0} total, ${Math.max(0, (Number(point.totalChecks) || 0) - (Number(point.healthyChecks) || 0))} failed</td><td>${Number.isFinite(point.availability) ? `${point.availability.toFixed(1)}%` : '—'}</td><td>${escapeHTML(formatLatency(point.p50Ms))}</td><td>${escapeHTML(formatLatency(point.p95Ms))}</td></tr>`).join('')}</tbody></table></div></details></div></div>`;
 }
 
 export function startServiceHistory({api, document, timeZone = 'browser'} = {}) {
@@ -174,9 +186,23 @@ export function startServiceHistory({api, document, timeZone = 'browser'} = {}) 
     }
   }
   rangeControl.addEventListener('change', event => { range = event.target.value; void refresh(); });
+  function showBucketDetail(bucket) {
+    const detail = root.querySelector?.('.history-status-detail');
+    if (detail) detail.textContent = bucket.dataset.historyDetail;
+  }
+  root.addEventListener('mouseover', event => {
+    const bucket = event.target?.closest?.('[data-history-detail]');
+    if (bucket) showBucketDetail(bucket);
+  });
+  root.addEventListener('focusin', event => {
+    const bucket = event.target?.closest?.('[data-history-detail]');
+    if (bucket) showBucketDetail(bucket);
+  });
   root.addEventListener('click', event => {
     const retry = event.target?.closest?.('[data-history-retry]');
     if (retry) { void refresh(); return; }
+    const bucket = event.target?.closest?.('[data-history-detail]');
+    if (bucket) { showBucketDetail(bucket); return; }
     const provider = event.target?.closest?.('[data-history-provider]');
     if (provider) { selectedID = provider.dataset.historyProvider === 'all' ? 'all' : Number(provider.dataset.historyProvider); render(); }
   });
