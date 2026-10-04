@@ -48,7 +48,7 @@ func TestHomepageAccessAndPayload(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 	a.homepage = homepageConfig{credential, "https://homepage.example"}
-	if w := request("/api/dashboard", credential, "GET"); w.Code != 303 || w.Header().Get("X-Frame-Options") != "DENY" {
+	if w := request("/api/dashboard", credential, "GET"); w.Code != 401 || w.Header().Get("X-Frame-Options") != "DENY" {
 		t.Fatal("integration credential authorized admin dashboard")
 	}
 	for _, tc := range []struct {
