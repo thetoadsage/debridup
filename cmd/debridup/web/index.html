@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>DebridUp</title>
   <script src="/theme-init.js"></script>
-  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/app.css"><link rel="stylesheet" href="/themes.css">
   <link rel="stylesheet" href="/notifications.css">
   <link rel="stylesheet" href="/provider-management.css">
 </head>
@@ -16,14 +16,14 @@
     <aside class="sidebar">
       <a class="brand" href="#dashboard" aria-label="DebridUp dashboard">
         <span class="mark" aria-hidden="true">D</span>
-        <span>DebridUp</span>
+        <span>DebridUp<small class="brand-caption">Service observatory</small></span>
       </a>
 
       <nav aria-label="Primary">
-        <a class="nav-link" href="#dashboard" data-view-link="dashboard">Dashboard</a>
-        <a class="nav-link" href="#incidents" data-view-link="incidents">Incidents</a>
-        <a class="nav-link" href="#history" data-view-link="history">Service history</a>
-        <a class="nav-link" href="#settings" data-view-link="settings">Settings</a>
+        <a class="nav-link" href="#dashboard" data-view-link="dashboard"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Dashboard</a>
+        <a class="nav-link" href="#incidents" data-view-link="incidents"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 2 20h20L12 3Z"/><path d="M12 9v5m0 3v.1"/></svg>Incidents</a>
+        <a class="nav-link" href="#history" data-view-link="history"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18M6 15l5-6 4 4 6-9"/></svg>Service history</a>
+        <a class="nav-link" href="#settings" data-view-link="settings"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="18" r="2"/></svg>Settings</a>
       </nav>
 
       <div class="sidebar-footer">
@@ -34,6 +34,10 @@
             <option value="neo-tokyo">Neo Tokyo</option>
             <option value="sakura">Sakura</option>
             <option value="terminal">Terminal</option>
+            <option value="porcelain">Porcelain</option>
+            <option value="ocean">Ocean</option>
+            <option value="ember">Ember</option>
+            <option value="moss">Moss</option>
           </select>
         </label>
         <button id="logout" class="quiet sidebar-signout" type="button">Sign out</button>

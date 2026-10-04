@@ -31,7 +31,7 @@ test('marks an aged health response stale', () => {
 test('keeps theme and time-zone preferences safe', () => {
   assert.equal(normalizeTheme('terminal'), 'terminal');
   assert.equal(normalizeTheme('not-a-theme'), 'graphite');
-  assert.equal(Object.keys(THEMES).length, 4);
+  assert.equal(Object.keys(THEMES).length, 8);
   assert.equal(AUTO_TIME_ZONE, 'browser');
   assert.match(timeZoneDescription('UTC'), /UTC/);
   const document = {documentElement: {dataset: {}}};

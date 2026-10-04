@@ -3,6 +3,10 @@ export const THEMES = Object.freeze({
   'neo-tokyo': 'Neo Tokyo',
   sakura: 'Sakura',
   terminal: 'Terminal',
+  porcelain: 'Porcelain',
+  ocean: 'Ocean',
+  ember: 'Ember',
+  moss: 'Moss',
 });
 
 const STORAGE_KEY = 'debridup-theme';
