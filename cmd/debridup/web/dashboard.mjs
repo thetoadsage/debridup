@@ -1,3 +1,4 @@
+import {providerColorClass} from './provider-colors.mjs';
 import {escapeHTML, formatLatency, formatTimestamp} from './dashboard-model.mjs';
 
 const REFRESH_INTERVAL_MS = 30_000;
@@ -57,7 +58,7 @@ export function startDashboard({api, document, window, timeZone, onRefresh} = {}
     const enabled = list.filter(provider => provider?.enabled !== false).length;
     const onlineClass = enabled === 0 ? 'summary-card-neutral' : online === enabled ? 'summary-card-online' : 'summary-card-alert';
     summary.innerHTML = `<h2 id="summary-heading" class="sr-only">Current status summary</h2><article class="summary-card summary-card-status ${stateClass(s.overallState)}"><span class="summary-label">Overall status</span><strong class="summary-value">${escapeHTML(displayState(s.overallState))}</strong><span class="summary-detail">Live service assessment</span></article><article class="summary-card ${onlineClass}"><span class="summary-label">Providers online</span><strong class="summary-value">${online}</strong><span class="summary-detail">${enabled ? `${online} of ${enabled} enabled services` : 'No enabled services'}</span></article><article class="summary-card ${active ? 'summary-card-alert' : 'summary-card-clear'}"><span class="summary-label">Active incidents</span><strong class="summary-value">${active}</strong><span class="summary-detail">${active ? 'Needs attention now' : 'No open incidents'}</span></article>`;
-    providers.innerHTML = list.length ? list.map(p => `<tr><th scope="row">${escapeHTML(p.name || 'Unnamed provider')}</th><td><span class="state ${stateClass(p.state)}">${escapeHTML(displayState(p.state))}</span></td><td>${escapeHTML(formatLatency(p.latencyMs))}</td><td>${escapeHTML(formatTimestamp(p.lastCheck, zone))}</td><td>${p.activeIncident ? '<strong>Active incident</strong>' : '—'}</td></tr>`).join('') : '<tr><td colspan="5"><div class="dashboard-empty"><p>No providers configured.</p><a href="#settings">Add a provider in Settings.</a></div></td></tr>';
+    providers.innerHTML = list.length ? list.map(p => `<tr class="${providerColorClass(p)}"><th scope="row"><i class="provider-dot" aria-hidden="true"></i>${escapeHTML(p.name || 'Unnamed provider')}</th><td><span class="state ${stateClass(p.state)}">${escapeHTML(displayState(p.state))}</span></td><td>${escapeHTML(formatLatency(p.latencyMs))}</td><td>${escapeHTML(formatTimestamp(p.lastCheck, zone))}</td><td>${p.activeIncident ? '<strong>Active incident</strong>' : '—'}</td></tr>`).join('') : '<tr><td colspan="5"><div class="dashboard-empty"><p>No providers configured.</p><a href="#settings">Add a provider in Settings.</a></div></td></tr>';
     summary.setAttribute('aria-busy', 'false');
     providers.setAttribute('aria-busy', 'false');
   }
