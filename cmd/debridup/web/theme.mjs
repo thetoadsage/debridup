@@ -7,6 +7,8 @@ export const THEMES = Object.freeze({
   ocean: 'Ocean',
   ember: 'Ember',
   moss: 'Moss',
+  ascii: 'ASCII',
+  matrix: 'Matrix',
 });
 
 const STORAGE_KEY = 'debridup-theme';

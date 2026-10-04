@@ -1,5 +1,5 @@
 (() => {
-  const themes = new Set(['graphite', 'neo-tokyo', 'sakura', 'terminal', 'porcelain', 'ocean', 'ember', 'moss']);
+  const themes = new Set(['graphite', 'neo-tokyo', 'sakura', 'terminal', 'porcelain', 'ocean', 'ember', 'moss', 'ascii', 'matrix']);
   let theme = 'graphite';
   try {
     const saved = localStorage.getItem('debridup-theme');

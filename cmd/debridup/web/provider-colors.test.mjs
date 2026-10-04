@@ -34,3 +34,16 @@ test('all theme selections persist and blocked storage remains usable', () => {
   }
   assert.equal(storedTheme({getItem() {throw Error('blocked');}}), 'graphite');
 });
+
+test('every selectable theme survives early initialization before the stylesheet paints', async () => {
+  const {readFile} = await import('node:fs/promises');
+  const {runInNewContext} = await import('node:vm');
+  const script = await readFile(new URL('./theme-init.js', import.meta.url), 'utf8');
+  const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  for (const theme of Object.keys(THEMES)) {
+    const document = {documentElement: {dataset: {}}};
+    runInNewContext(script, {document, localStorage: {getItem() {return theme;}}});
+    assert.equal(document.documentElement.dataset.theme, theme);
+    assert.ok(html.includes(`<option value="${theme}">`));
+  }
+});
