@@ -48,6 +48,7 @@ const (
 var errInvalidEncryptionKey = errors.New("invalid encryption key")
 
 type app struct {
+	homepage          homepageConfig
 	db                *sql.DB
 	key               []byte
 	client            *http.Client
@@ -165,6 +166,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	homepage, err := parseHomepageConfig(os.Getenv("DEBRIDUP_HOMEPAGE_TOKEN"), os.Getenv("DEBRIDUP_HOMEPAGE_ORIGIN"))
+	if err != nil {
+		return err
+	}
 	dataDir := env("DEBRIDUP_DATA_DIR", "./data")
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return fmt.Errorf("create data directory %q: %w", dataDir, err)
@@ -180,7 +185,7 @@ func run() error {
 	defer db.Close()
 
 	cookieHash := sha256.Sum256(key)
-	a := &app{db: db, key: key, cookieKey: cookieHash[:], client: &http.Client{Timeout: 65 * time.Second}, logger: slog.Default(), runs: newRunCoordinator(maxConcurrentChecks), startedAt: time.Now()}
+	a := &app{homepage: homepage, db: db, key: key, cookieKey: cookieHash[:], client: &http.Client{Timeout: 65 * time.Second}, logger: slog.Default(), runs: newRunCoordinator(maxConcurrentChecks), startedAt: time.Now()}
 	if err := migrateDatabase(context.Background(), db); err != nil {
 		return fmt.Errorf("apply database migrations: %w", err)
 	}
@@ -356,6 +361,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]bool{"ok": true}) })
 	mux.HandleFunc("GET /readyz", a.readiness)
 	mux.HandleFunc("GET /integrations/health/{provider}", a.providerHealth)
+	mux.HandleFunc("/integrations/homepage", a.homepageData)
+	mux.HandleFunc("/integrations/homepage/chart", a.homepageEmbed)
 	mux.HandleFunc("POST /login", a.login)
 	mux.HandleFunc("POST /logout", a.logout)
 	mux.HandleFunc("GET /api/dashboard", a.auth(a.dashboard))

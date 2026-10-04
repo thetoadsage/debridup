@@ -127,3 +127,7 @@ To build locally instead of using the published image:
 ```sh
 docker build -t debridup:local .
 ```
+
+### Homepage widgets
+
+Use the opt-in [Homepage integration](docs/homepage.md) for provider lists, status counters, and embedded latency or availability graphs. It uses a separate read-only credential and the existing dashboard history.
