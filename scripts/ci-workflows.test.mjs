@@ -56,7 +56,7 @@ test('verification job runs every required gate with fixed toolchains', () => {
   const dockerfile = readFileSync(resolve(root, 'Dockerfile'), 'utf8');
 
   for (const expected of [
-    'go-version: "1.25.14"',
+    'go-version: "1.27.2"',
     'node-version: "22"',
     'ref: ${{ github.event.pull_request.head.sha || github.sha }}',
     'gofmt -l',
