@@ -141,7 +141,8 @@ scan_source() {
 	fi
 
 	: > "$email_matches"
-	grep -aEio '[[:alnum:]._%+-]+@[[:alnum:].-]+\.[[:alpha:]]{2,}' "$source_file" > "$email_matches" || true
+	# ASCII email syntax avoids locale-dependent matches in compressed image bytes.
+	LC_ALL=C grep -aEio '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' "$source_file" > "$email_matches" || true
 	if [ -s "$email_matches" ] && grep -Eiv '^(noreply@github\.com|[[:alnum:]._%+-]+@users\.noreply\.github\.com)$' "$email_matches" >/dev/null; then
 		reject_source "$source_name" 'an ordinary email address'
 	fi

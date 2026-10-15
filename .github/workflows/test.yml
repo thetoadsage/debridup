@@ -63,6 +63,11 @@ jobs:
       - name: Run workflow contract tests
         run: node --test scripts/ci-workflows.test.mjs
 
+      - name: Run release safety tests
+        env:
+          LC_ALL: C.UTF-8
+        run: sh scripts/check-release-safety.test.sh
+
       - name: Install vulnerability scanner
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
 

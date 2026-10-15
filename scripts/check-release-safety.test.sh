@@ -99,6 +99,16 @@ printf 'contact %s\n' "$personal_email" > "$current_repo/tracked.txt"
 expect_fail "ordinary email fails" scan
 git -C "$current_repo" restore tracked.txt
 
+printf 'neutral\000t@d.\321\274x\n' > "$current_repo/tracked.txt"
+git -C "$current_repo" add tracked.txt
+expect_pass "binary Unicode email lookalike passes in worktree and index" scan
+git -C "$current_repo" reset -q --hard HEAD
+
+printf 'neutral\000%s\n' "$personal_email" > "$current_repo/tracked.txt"
+git -C "$current_repo" add tracked.txt
+expect_reject "ASCII email after NUL remains rejected in binary content" scan
+git -C "$current_repo" reset -q --hard HEAD
+
 marker_one="$(printf '\143\157\144\145\170')"
 printf 'attribution %s\n' "$marker_one" > "$current_repo/tracked.txt"
 expect_fail "first runtime marker fails" scan

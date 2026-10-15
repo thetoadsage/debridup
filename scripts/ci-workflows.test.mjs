@@ -65,6 +65,7 @@ test('verification job runs every required gate with fixed toolchains', () => {
     'go vet ./...',
     'node --test cmd/debridup/web/dashboard-model.test.mjs',
     'node --test scripts/ci-workflows.test.mjs',
+    'sh scripts/check-release-safety.test.sh',
     'golang.org/x/vuln/cmd/govulncheck@v1.7.0',
     'govulncheck ./...',
     'docker build -t debridup:test .',
