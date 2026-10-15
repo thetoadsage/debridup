@@ -8,5 +8,6 @@ bin/
 *.db-wal
 .worktrees/
 .superpowers/
+/memory.md
 secrets/*
 !secrets/.gitkeep

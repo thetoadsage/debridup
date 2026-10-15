@@ -113,6 +113,26 @@ For self-hosted AIOStreams:
 
 AIOStreams caches results, so switching also depends on its refresh interval. See its [health-check reference](https://docs.aiostreams.viren070.me/reference/config-expressions/#health-checks).
 
+### [Tam-Taro's SEL Filtering and Sorting template](https://github.com/Tam-Taro/SEL-Filtering-and-Sorting)
+
+Tam-Taro's template can replace health checks when you import it or apply an update. Add or restore these checks **after** importing or updating the template. In AIOStreams, open **Misc → Health Checks** and edit a check with the pencil icon.
+
+![AIOStreams Misc settings with Health Checks selected and the TorBox edit button indicated](docs/images/tam-taro-healthcheck-navigation.png)
+
+![Example Tam-Taro health-check settings for TorBox](docs/images/tam-taro-healthcheck.png)
+
+For each provider check you want to connect, click its pencil icon and change only these settings:
+
+1. Replace the **URL** with the DebridUp health URL, for example `http://debridup:8080/integrations/health/torbox`.
+   - `debridup` is an example hostname. Use a name that resolves from the AIOStreams container, or your server's reachable IP address and port. The containers must be able to reach each other over the network.
+   - Replace `torbox` at the end with the provider slug, such as `torrin` or `realdebrid`. See the supported provider list above.
+2. Clear **JSON path** and **Expected value**, leaving both fields empty.
+3. Optionally change **Interval**. The minimum is `60` seconds; I use 60 seconds for a self-hosted setup.
+
+Leave the other settings as the template provides them, including the check ID, method, expected status, timeout, and failure behavior. When you test a healthy provider, the result should say **Not healthy** while showing **HTTP 200** and a short response time. This is intentional: the template expects `503` so a check such as `torbox-down` becomes true when DebridUp reports TorBox as unhealthy. Save the check, then repeat for any other provider checks you want to connect.
+
+This template-specific setup intentionally differs from the `200` expected status described above for ordinary AIOStreams health checks. Keep the endpoint private to your trusted network.
+
 This route intentionally requires no session. Anyone who can reach it can read the provider's availability. Keep it on your private network, or restrict the route at your reverse proxy if DebridUp is publicly reachable. An external login proxy must not intercept the container-to-container request.
 
 ## Security notes
